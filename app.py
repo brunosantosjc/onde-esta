@@ -1,13 +1,13 @@
 from flask import Flask, request, jsonify
 import requests
+import time
 
 app = Flask(__name__)
 
-# Guarda a última posição recebida por pessoa
 ultima_posicao = {}
 
 # ==============================
-# ETAPA 1 — Reverse Geocoding
+# Reverse Geocoding
 # ==============================
 def latlon_para_rua(lat, lon):
     url = "https://nominatim.openstreetmap.org/reverse"
@@ -44,12 +44,8 @@ def owntracks_webhook():
     topic = data.get("topic", "")
     partes = topic.split("/")
 
-    if len(partes) >= 2:
-        nome = partes[1].lower()
-    else:
-        nome = "desconhecido"
+    nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
 
-    # Aceita apenas pacotes de localização
     if data.get("_type") == "location":
         lat = data.get("lat")
         lon = data.get("lon")
@@ -57,14 +53,44 @@ def owntracks_webhook():
         if lat is not None and lon is not None:
             ultima_posicao[nome] = {
                 "lat": lat,
-                "lon": lon
+                "lon": lon,
+                "timestamp": int(time.time())
             }
 
     return jsonify({"status": "ok"})
 
 
 # ==============================
-# Endpoint debug
+# FORÇAR POSIÇÃO (MANUAL)
+# ==============================
+@app.route("/force/<nome>")
+def force(nome):
+    """
+    Exemplo:
+    /force/bruno?lat=-23.5055&lon=-46.4914
+    """
+    try:
+        lat = float(request.args.get("lat"))
+        lon = float(request.args.get("lon"))
+    except Exception:
+        return jsonify({"erro": "lat e lon obrigatórios"}), 400
+
+    ultima_posicao[nome.lower()] = {
+        "lat": lat,
+        "lon": lon,
+        "timestamp": int(time.time())
+    }
+
+    return jsonify({
+        "status": "forçado com sucesso",
+        "nome": nome,
+        "lat": lat,
+        "lon": lon
+    })
+
+
+# ==============================
+# Debug
 # ==============================
 @app.route("/debug")
 def debug():
@@ -74,7 +100,7 @@ def debug():
 
 
 # ==============================
-# Endpoint: onde está
+# Onde está
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -92,8 +118,5 @@ def onde_esta(nome):
     })
 
 
-# ==============================
-# Inicialização
-# ==============================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
