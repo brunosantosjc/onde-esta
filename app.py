@@ -7,11 +7,12 @@ ultima_posicao = {}
 @app.route("/location", methods=["POST"])
 def receive_location():
     data = request.json or {}
-    device = data.get("device", "esposa")
+
+    device = data.get("device") or data.get("tid") or "bruno"
     lat = data.get("lat")
     lon = data.get("lon")
 
-    if lat and lon:
+    if lat is not None and lon is not None:
         ultima_posicao[device.lower()] = {
             "lat": lat,
             "lon": lon
