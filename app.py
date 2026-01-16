@@ -3,10 +3,17 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 ultima_posicao = {}
+ultimo_payload = {}
 
 @app.route("/location", methods=["POST"])
 def receive_location():
-    data = request.json or {}
+    global ultimo_payload
+    data = request.get_json(force=True, silent=True)
+
+    ultimo_payload = data
+
+    if not data:
+        return jsonify({"status": "no json received"}), 400
 
     device = data.get("device") or data.get("tid") or "bruno"
     lat = data.get("lat")
@@ -18,8 +25,15 @@ def receive_location():
             "lon": lon
         }
 
-    return jsonify({"status": "ok"})
+    return jsonify({"status": "ok", "received": data})
 
 @app.route("/where/<device>")
 def where(device):
     return jsonify(ultima_posicao.get(device.lower(), {}))
+
+@app.route("/debug")
+def debug():
+    return jsonify({
+        "ultima_posicao": ultima_posicao,
+        "ultimo_payload": ultimo_payload
+    })
