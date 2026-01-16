@@ -16,12 +16,16 @@ def receive_location(path):
     if not data:
         return jsonify({"status": "no json"}), 400
 
-    device = data.get("device") or data.get("tid") or "bruno"
+    # Aceita apenas pacotes de localização
+    if data.get("_type") != "location":
+        return jsonify({"status": "ignored"}), 200
+
     lat = data.get("lat")
     lon = data.get("lon")
 
     if lat is not None and lon is not None:
-        ultima_posicao[device.lower()] = {
+        # força o nome lógico que você vai usar na Alexa
+        ultima_posicao["bruno"] = {
             "lat": lat,
             "lon": lon
         }
