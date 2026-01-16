@@ -5,15 +5,16 @@ app = Flask(__name__)
 ultima_posicao = {}
 ultimo_payload = {}
 
-@app.route("/location", methods=["POST"])
-def receive_location():
+@app.route("/", defaults={"path": ""}, methods=["POST"])
+@app.route("/<path:path>", methods=["POST"])
+def receive_location(path):
     global ultimo_payload
-    data = request.get_json(force=True, silent=True)
 
+    data = request.get_json(force=True, silent=True)
     ultimo_payload = data
 
     if not data:
-        return jsonify({"status": "no json received"}), 400
+        return jsonify({"status": "no json"}), 400
 
     device = data.get("device") or data.get("tid") or "bruno"
     lat = data.get("lat")
@@ -25,7 +26,7 @@ def receive_location():
             "lon": lon
         }
 
-    return jsonify({"status": "ok", "received": data})
+    return jsonify({"status": "ok"})
 
 @app.route("/where/<device>")
 def where(device):
