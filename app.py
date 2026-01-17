@@ -1,13 +1,14 @@
 from flask import Flask, request, jsonify
 import requests
 import time
+import math
 
 app = Flask(__name__)
 
 ultima_posicao = {}
 
 # ==============================
-# Reverse Geocoding
+# Função de reverse geocoding
 # ==============================
 def latlon_para_rua(lat, lon):
     url = "https://nominatim.openstreetmap.org/reverse"
@@ -17,7 +18,9 @@ def latlon_para_rua(lat, lon):
         "format": "json",
         "addressdetails": 1
     }
-    headers = {"User-Agent": "AlexaOndeEsta/1.0"}
+    headers = {
+        "User-Agent": "AlexaOndeEsta/1.0"
+    }
 
     try:
         r = requests.get(url, params=params, headers=headers, timeout=10)
@@ -35,6 +38,44 @@ def latlon_para_rua(lat, lon):
     return ", ".join(partes) if partes else "localização desconhecida"
 
 # ==============================
+# Função Haversine
+# ==============================
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000  # metros
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+
+    a = math.sin(delta_phi/2)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+
+    return R * c
+
+# ==============================
+# Direção cardinal
+# ==============================
+def calcular_direcao_cardinal(cog):
+    if cog is None:
+        return "desconhecida"
+    if (cog >= 0 and cog <= 22) or (cog > 338 and cog <= 360):
+        return "Norte"
+    elif cog <= 67:
+        return "Nordeste"
+    elif cog <= 112:
+        return "Leste"
+    elif cog <= 157:
+        return "Sudeste"
+    elif cog <= 202:
+        return "Sul"
+    elif cog <= 247:
+        return "Sudoeste"
+    elif cog <= 292:
+        return "Oeste"
+    else:
+        return "Noroeste"
+
+# ==============================
 # Webhook OwnTracks
 # ==============================
 @app.route("/", methods=["POST"])
@@ -48,12 +89,14 @@ def owntracks_webhook():
         ultima_posicao[nome] = {
             "lat": data.get("lat"),
             "lon": data.get("lon"),
-            "vel": round(data.get("vel", 0) * 3.6, 1),  # m/s -> km/h
-            "cog": data.get("cog", 0),
+            "vel": data.get("vel", 0),
+            "cog": data.get("cog", None),
             "motion": "em movimento" if data.get("m", 0) else "parado",
             "batt": data.get("batt", None),
             "rede": "Wi-Fi" if data.get("conn") == "w" else "rede celular",
-            "timestamp": data.get("tst", int(time.time()))
+            "timestamp": data.get("tst", int(time.time())),
+            "lat_anterior": data.get("lat"),
+            "lon_anterior": data.get("lon")
         }
 
     return jsonify({"status": "ok"})
@@ -77,7 +120,9 @@ def force(nome):
         "motion": "parado",
         "batt": None,
         "rede": None,
-        "timestamp": int(time.time())
+        "timestamp": int(time.time()),
+        "lat_anterior": lat,
+        "lon_anterior": lon
     }
 
     return jsonify({
@@ -92,7 +137,9 @@ def force(nome):
 # ==============================
 @app.route("/debug")
 def debug():
-    return jsonify({"ultima_posicao": ultima_posicao})
+    return jsonify({
+        "ultima_posicao": ultima_posicao
+    })
 
 # ==============================
 # Onde está (primeira resposta)
@@ -121,10 +168,10 @@ def detalhes(nome):
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
     pos = ultima_posicao[nome]
-
-    # Calcula tempo desde última atualização
     agora = int(time.time())
     diff = agora - pos["timestamp"]
+
+    # Tempo desde última atualização
     if diff < 60:
         tempo = "agora"
     elif diff < 3600:
@@ -134,22 +181,35 @@ def detalhes(nome):
         horas = diff // 3600
         tempo = f"há {horas} hora{'s' if horas > 1 else ''}"
 
+    # Distância da posição anterior
+    distancia = haversine(pos["lat_anterior"], pos["lon_anterior"], pos["lat"], pos["lon"])
+    parado = distancia <= 10  # Raio de 10 metros
+    motion_status = "parado" if parado else "em movimento"
+
+    # Direção cardinal
+    direcao = calcular_direcao_cardinal(pos.get("cog"))
+
+    # Velocidade km/h
+    vel_kmh = pos.get("vel", 0) * 3.6
+
     detalhes_texto = (
-        f"Ele está {pos['motion']}, velocidade {pos['vel']} km/h, "
-        f"direção {pos['cog']}°, bateria {pos['batt']}%, "
-        f"conectado à {pos['rede']}. Última atualização {tempo}."
+        f"Ele está {motion_status}, "
+        f"indo na direção {direcao}, "
+        f"velocidade {vel_kmh:.1f} km/h, "
+        f"bateria {pos.get('batt', 'desconhecida')}%, "
+        f"conectado à {pos.get('rede', 'desconhecida')}. "
+        f"Última atualização {tempo}."
     )
+
+    # Atualiza lat/lon anterior
+    pos["lat_anterior"] = pos["lat"]
+    pos["lon_anterior"] = pos["lon"]
 
     return jsonify({
         "nome": nome,
-        "detalhes": detalhes_texto,
-        "vel": pos["vel"],
-        "cog": pos["cog"],
-        "motion": pos["motion"],
-        "batt": pos["batt"],
-        "rede": pos["rede"],
-        "timestamp": pos["timestamp"]
+        "detalhes": detalhes_texto
     })
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
