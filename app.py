@@ -17,13 +17,14 @@ def latlon_para_rua(lat, lon):
         "format": "json",
         "addressdetails": 1
     }
-    headers = {
-        "User-Agent": "AlexaOndeEsta/1.0"
-    }
+    headers = {"User-Agent": "AlexaOndeEsta/1.0"}
 
-    r = requests.get(url, params=params, headers=headers, timeout=10)
-    r.raise_for_status()
-    data = r.json()
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return "localização desconhecida"
 
     address = data.get("address", {})
     rua = address.get("road")
@@ -33,24 +34,21 @@ def latlon_para_rua(lat, lon):
     partes = [p for p in [rua, bairro, cidade] if p]
     return ", ".join(partes) if partes else "localização desconhecida"
 
-
 # ==============================
 # Webhook OwnTracks
 # ==============================
 @app.route("/", methods=["POST"])
 def owntracks_webhook():
     data = request.json or {}
-
     topic = data.get("topic", "")
     partes = topic.split("/")
-
     nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
 
     if data.get("_type") == "location":
         ultima_posicao[nome] = {
             "lat": data.get("lat"),
             "lon": data.get("lon"),
-            "vel": data.get("vel", 0),
+            "vel": round(data.get("vel", 0) * 3.6, 1),  # m/s -> km/h
             "cog": data.get("cog", 0),
             "motion": "em movimento" if data.get("m", 0) else "parado",
             "batt": data.get("batt", None),
@@ -60,9 +58,8 @@ def owntracks_webhook():
 
     return jsonify({"status": "ok"})
 
-
 # ==============================
-# FORÇAR POSIÇÃO (MANUAL)
+# Forçar posição manual
 # ==============================
 @app.route("/force/<nome>")
 def force(nome):
@@ -90,16 +87,12 @@ def force(nome):
         "lon": lon
     })
 
-
 # ==============================
 # Debug
 # ==============================
 @app.route("/debug")
 def debug():
-    return jsonify({
-        "ultima_posicao": ultima_posicao
-    })
-
+    return jsonify({"ultima_posicao": ultima_posicao})
 
 # ==============================
 # Onde está (primeira resposta)
@@ -117,7 +110,6 @@ def onde_esta(nome):
         "nome": nome,
         "rua": rua
     })
-
 
 # ==============================
 # Detalhes (segunda resposta)
@@ -143,16 +135,21 @@ def detalhes(nome):
         tempo = f"há {horas} hora{'s' if horas > 1 else ''}"
 
     detalhes_texto = (
-        f"Ele está {pos['motion']}, velocidade {pos['vel']} m/s, "
+        f"Ele está {pos['motion']}, velocidade {pos['vel']} km/h, "
         f"direção {pos['cog']}°, bateria {pos['batt']}%, "
         f"conectado à {pos['rede']}. Última atualização {tempo}."
     )
 
     return jsonify({
         "nome": nome,
-        "detalhes": detalhes_texto
+        "detalhes": detalhes_texto,
+        "vel": pos["vel"],
+        "cog": pos["cog"],
+        "motion": pos["motion"],
+        "batt": pos["batt"],
+        "rede": pos["rede"],
+        "timestamp": pos["timestamp"]
     })
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
