@@ -1,149 +1,112 @@
-import json
+from flask import Flask, request, jsonify
 import requests
-from ask_sdk_core.skill_builder import SkillBuilder
-from ask_sdk_core.dispatch_components import AbstractRequestHandler
-from ask_sdk_core.handler_input import HandlerInput
-from ask_sdk_core.utils import is_request_type, is_intent_name
-from ask_sdk_model import Response
+import time
 
-# 🔗 URL do seu backend no Render
-BASE_URL = "https://onde-esta.onrender.com"
+app = Flask(__name__)
 
-# =========================
-# Launch Request
-# =========================
-class LaunchRequestHandler(AbstractRequestHandler):
-    def can_handle(self, handler_input: HandlerInput) -> bool:
-        return is_request_type("LaunchRequest")(handler_input)
+ultima_posicao = {}
 
-    def handle(self, handler_input: HandlerInput) -> Response:
-        speak_output = "Você pode perguntar onde está alguém. Por exemplo, onde está Bruno."
-        return handler_input.response_builder.speak(speak_output).ask(speak_output).response
+# ==============================
+# Reverse Geocoding
+# ==============================
+def latlon_para_rua(lat, lon):
+    url = "https://nominatim.openstreetmap.org/reverse"
+    params = {"lat": lat, "lon": lon, "format": "json", "addressdetails": 1}
+    headers = {"User-Agent": "AlexaOndeEsta/1.0"}
 
+    r = requests.get(url, params=params, headers=headers, timeout=10)
+    r.raise_for_status()
+    data = r.json()
 
-# =========================
-# OndeEstaIntent (Primeira pergunta)
-# =========================
-class OndeEstaIntentHandler(AbstractRequestHandler):
-    def can_handle(self, handler_input: HandlerInput) -> bool:
-        return is_intent_name("OndeEstaIntent")(handler_input)
+    address = data.get("address", {})
+    rua = address.get("road")
+    bairro = address.get("suburb")
+    cidade = address.get("city") or address.get("town")
 
-    def handle(self, handler_input: HandlerInput) -> Response:
-        try:
-            slots = handler_input.request_envelope.request.intent.slots
-            slot_pessoa = slots.get("pessoa")
-            if not slot_pessoa or not slot_pessoa.value:
-                return handler_input.response_builder.speak(
-                    "Não entendi o nome da pessoa."
-                ).ask("Pode repetir o nome?").response
+    partes = [p for p in [rua, bairro, cidade] if p]
+    return ", ".join(partes) if partes else "localização desconhecida"
 
-            pessoa = slot_pessoa.value.lower()
+# ==============================
+# Função para formatar tempo desde última atualização
+# ==============================
+def tempo_desde(timestamp):
+    agora = int(time.time())
+    diff = agora - timestamp
+    if diff < 60:
+        return "agora"
+    elif diff < 3600:
+        minutos = diff // 60
+        return f"há {minutos} minuto{'s' if minutos > 1 else ''} atrás"
+    else:
+        horas = diff // 3600
+        return f"há {horas} hora{'s' if horas > 1 else ''} atrás"
 
-            # Chamada ao backend /where/<nome>
-            url = f"{BASE_URL}/where/{pessoa}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code != 200:
-                return handler_input.response_builder.speak(
-                    f"Não encontrei a localização de {pessoa}."
-                ).response
+# ==============================
+# Webhook OwnTracks
+# ==============================
+@app.route("/", methods=["POST"])
+def owntracks_webhook():
+    data = request.json or {}
+    topic = data.get("topic", "")
+    partes = topic.split("/")
 
-            data = resp.json()
-            rua = data.get("rua", "localização desconhecida")
+    nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
 
-            speak_output = f"{pessoa.capitalize()} está na {rua}. Quer mais detalhes?"
-            # Mantém sessão aberta para responder o YesIntent
-            return handler_input.response_builder.speak(speak_output).ask("Quer ouvir os detalhes?").response
+    if data.get("_type") == "location":
+        ultima_posicao[nome] = {
+            "lat": data.get("lat"),
+            "lon": data.get("lon"),
+            "vel": data.get("vel", 0),
+            "cog": data.get("cog", 0),
+            "motion": "em movimento" if data.get("m", 0) else "parado",
+            "batt": data.get("batt", None),
+            "rede": "Wi-Fi" if data.get("conn") == "w" else "rede celular",
+            "timestamp": data.get("tst", int(time.time()))
+        }
 
-        except Exception as e:
-            print("Erro:", e)
-            return handler_input.response_builder.speak(
-                "Ocorreu um erro ao buscar a localização."
-            ).response
+    return jsonify({"status": "ok"})
 
+# ==============================
+# Onde está (primeira resposta)
+# ==============================
+@app.route("/where/<nome>")
+def onde_esta(nome):
+    nome = nome.lower()
+    if nome not in ultima_posicao:
+        return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-# =========================
-# YesIntent (Segunda pergunta)
-# =========================
-class YesIntentHandler(AbstractRequestHandler):
-    def can_handle(self, handler_input: HandlerInput) -> bool:
-        return is_intent_name("AMAZON.YesIntent")(handler_input)
+    pos = ultima_posicao[nome]
+    rua = latlon_para_rua(pos["lat"], pos["lon"])
+    tempo = tempo_desde(pos["timestamp"])
 
-    def handle(self, handler_input: HandlerInput) -> Response:
-        # Tenta pegar a pessoa do session_attributes
-        session_attr = handler_input.attributes_manager.session_attributes
-        pessoa = session_attr.get("ultima_pessoa")
-        if not pessoa:
-            return handler_input.response_builder.speak(
-                "Não sei a quem você se refere. Pergunte primeiro onde está alguém."
-            ).response
+    # Se parado, não mostra direção
+    direcao_texto = f", direção {pos['cog']}°" if pos["motion"] != "parado" else ""
 
-        try:
-            # Chamada ao backend /details/<nome>
-            url = f"{BASE_URL}/details/{pessoa}"
-            resp = requests.get(url, timeout=5)
-            if resp.status_code != 200:
-                return handler_input.response_builder.speak(
-                    f"Não consegui obter os detalhes de {pessoa} agora."
-                ).response
+    # Ajuste para começar com "agora" se o tempo for "agora"
+    prefixo_tempo = "agora " if tempo == "agora" else ""
+    primeira_resposta = f"{nome.capitalize()} está {prefixo_tempo}próximo da {rua}{direcao_texto}. Última posição {tempo}."
 
-            data = resp.json()
-            detalhes = data.get("detalhes", "Detalhes indisponíveis")
+    return jsonify({"nome": nome, "resposta": primeira_resposta, "pos": pos})
 
-            return handler_input.response_builder.speak(detalhes).response
+# ==============================
+# Detalhes (segunda resposta)
+# ==============================
+@app.route("/details/<nome>")
+def detalhes(nome):
+    nome = nome.lower()
+    if nome not in ultima_posicao:
+        return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-        except Exception as e:
-            print("Erro:", e)
-            return handler_input.response_builder.speak(
-                "Ocorreu um erro ao buscar os detalhes."
-            ).response
+    pos = ultima_posicao[nome]
+    tempo = tempo_desde(pos["timestamp"])
 
+    detalhes_texto = (
+        f"Ele está {pos['motion']}, velocidade {pos['vel']} m/s"
+        + (f", direção {pos['cog']}°" if pos["motion"] != "parado" else "")
+        + f", bateria {pos['batt']}%, conectado à {pos['rede']}. Última atualização {tempo}."
+    )
 
-# =========================
-# Help Intent
-# =========================
-class HelpIntentHandler(AbstractRequestHandler):
-    def can_handle(self, handler_input: HandlerInput) -> bool:
-        return is_intent_name("AMAZON.HelpIntent")(handler_input)
+    return jsonify({"nome": nome, "detalhes": detalhes_texto})
 
-    def handle(self, handler_input: HandlerInput) -> Response:
-        speak_output = "Você pode perguntar, por exemplo, onde está Bruno."
-        return handler_input.response_builder.speak(speak_output).ask(speak_output).response
-
-
-# =========================
-# Cancel / Stop
-# =========================
-class CancelOrStopIntentHandler(AbstractRequestHandler):
-    def can_handle(self, handler_input: HandlerInput) -> bool:
-        return is_intent_name("AMAZON.CancelIntent")(handler_input) or \
-               is_intent_name("AMAZON.StopIntent")(handler_input)
-
-    def handle(self, handler_input: HandlerInput) -> Response:
-        return handler_input.response_builder.speak("Até mais.").response
-
-
-# =========================
-# Fallback
-# =========================
-class FallbackIntentHandler(AbstractRequestHandler):
-    def can_handle(self, handler_input: HandlerInput) -> bool:
-        return is_intent_name("AMAZON.FallbackIntent")(handler_input)
-
-    def handle(self, handler_input: HandlerInput) -> Response:
-        speak_output = "Não entendi. Tente dizer, por exemplo, onde está Bruno."
-        return handler_input.response_builder.speak(speak_output).ask(speak_output).response
-
-
-# =========================
-# Skill Builder
-# =========================
-sb = SkillBuilder()
-
-sb.add_request_handler(LaunchRequestHandler())
-sb.add_request_handler(OndeEstaIntentHandler())
-sb.add_request_handler(YesIntentHandler())
-sb.add_request_handler(HelpIntentHandler())
-sb.add_request_handler(CancelOrStopIntentHandler())
-sb.add_request_handler(FallbackIntentHandler())
-
-lambda_handler = sb.lambda_handler()
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
