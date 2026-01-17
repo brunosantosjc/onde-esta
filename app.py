@@ -21,20 +21,17 @@ def latlon_para_rua(lat, lon):
         "User-Agent": "AlexaOndeEsta/1.0"
     }
 
-    try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.json()
+    r = requests.get(url, params=params, headers=headers, timeout=10)
+    r.raise_for_status()
+    data = r.json()
 
-        address = data.get("address", {})
-        rua = address.get("road")
-        bairro = address.get("suburb")
-        cidade = address.get("city") or address.get("town")
+    address = data.get("address", {})
+    rua = address.get("road")
+    bairro = address.get("suburb")
+    cidade = address.get("city") or address.get("town")
 
-        partes = [p for p in [rua, bairro, cidade] if p]
-        return ", ".join(partes) if partes else "localização desconhecida"
-    except Exception:
-        return "localização desconhecida"
+    partes = [p for p in [rua, bairro, cidade] if p]
+    return ", ".join(partes) if partes else "localização desconhecida"
 
 
 # ==============================
@@ -43,31 +40,23 @@ def latlon_para_rua(lat, lon):
 @app.route("/", methods=["POST"])
 def owntracks_webhook():
     data = request.json or {}
+
     topic = data.get("topic", "")
     partes = topic.split("/")
 
     nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
 
     if data.get("_type") == "location":
-        lat = data.get("lat")
-        lon = data.get("lon")
-        vel = data.get("vel", 0)
-        cog = data.get("cog", 0)
-        motion = data.get("m", 0)  # 1 = movendo, 0 = parado
-        batt = data.get("batt", 0)
-        rede = "Wi-Fi" if data.get("conn") == "w" else "Rede móvel"
-
-        if lat is not None and lon is not None:
-            ultima_posicao[nome] = {
-                "lat": lat,
-                "lon": lon,
-                "timestamp": int(time.time()),
-                "vel": vel,
-                "cog": cog,
-                "motion": motion,
-                "batt": batt,
-                "rede": rede
-            }
+        ultima_posicao[nome] = {
+            "lat": data.get("lat"),
+            "lon": data.get("lon"),
+            "vel": data.get("vel", 0),
+            "cog": data.get("cog", 0),
+            "motion": "em movimento" if data.get("m", 0) else "parado",
+            "batt": data.get("batt", None),
+            "rede": "Wi-Fi" if data.get("conn") == "w" else "rede celular",
+            "timestamp": data.get("tst", int(time.time()))
+        }
 
     return jsonify({"status": "ok"})
 
@@ -77,10 +66,6 @@ def owntracks_webhook():
 # ==============================
 @app.route("/force/<nome>")
 def force(nome):
-    """
-    Exemplo:
-    /force/bruno?lat=-23.5055&lon=-46.4914
-    """
     try:
         lat = float(request.args.get("lat"))
         lon = float(request.args.get("lon"))
@@ -90,6 +75,11 @@ def force(nome):
     ultima_posicao[nome.lower()] = {
         "lat": lat,
         "lon": lon,
+        "vel": 0,
+        "cog": 0,
+        "motion": "parado",
+        "batt": None,
+        "rede": None,
         "timestamp": int(time.time())
     }
 
@@ -112,12 +102,11 @@ def debug():
 
 
 # ==============================
-# Onde está - Primeira resposta
+# Onde está (primeira resposta)
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
     nome = nome.lower()
-
     if nome not in ultima_posicao:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
@@ -131,18 +120,17 @@ def onde_esta(nome):
 
 
 # ==============================
-# Detalhes adicionais - Segunda resposta
+# Detalhes (segunda resposta)
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
     nome = nome.lower()
-
     if nome not in ultima_posicao:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
     pos = ultima_posicao[nome]
 
-    # Tempo desde a última atualização
+    # Calcula tempo desde última atualização
     agora = int(time.time())
     diff = agora - pos["timestamp"]
     if diff < 60:
@@ -154,8 +142,17 @@ def detalhes(nome):
         horas = diff // 3600
         tempo = f"há {horas} hora{'s' if horas > 1 else ''}"
 
-    motion_text = "movendo-se" if pos.get("motion", 0) == 1 else "parado"
-
     detalhes_texto = (
-        f"Ele está {motion_text}, velocidade {pos.get('vel',0)} m/s, "
-        f"direção {pos.get('c
+        f"Ele está {pos['motion']}, velocidade {pos['vel']} m/s, "
+        f"direção {pos['cog']}°, bateria {pos['batt']}%, "
+        f"conectado à {pos['rede']}. Última atualização {tempo}."
+    )
+
+    return jsonify({
+        "nome": nome,
+        "detalhes": detalhes_texto
+    })
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
