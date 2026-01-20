@@ -54,31 +54,67 @@ def grau_para_direcao(cog):
     return direcoes[idx]
 
 # ==============================
-# Webhook OwnTracks
+# Webhook OwnTracks + Remote Config
 # ==============================
 @app.route("/", methods=["POST"])
 def owntracks_webhook():
     data = request.json or {}
+
+    if data.get("_type") != "location":
+        return jsonify({"status": "ok"})
+
     topic = data.get("topic", "")
     partes = topic.split("/")
-
     nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
 
-    if data.get("_type") == "location":
-        ssid = data.get("ssid")
-        wifi_nome = ssid if ssid else "Wi-Fi desconhecido"
+    # Wi-Fi corrigido (evita None)
+    ssid = data.get("ssid")
+    wifi_nome = ssid if ssid and ssid.lower() != "none" else "Wi-Fi desconhecido"
 
-        ultima_posicao[nome] = {
-            "lat": data.get("lat"),
-            "lon": data.get("lon"),
-            "vel": data.get("vel", 0),  # m/s
-            "cog": data.get("cog", 0),
-            "batt": data.get("batt"),
-            "wifi": wifi_nome,
-            "timestamp": data.get("tst", int(time.time()))
+    vel_ms = data.get("vel", 0) or 0
+    vel_kmh = vel_ms * 3.6
+    parado = vel_kmh <= 6
+
+    timestamp = data.get("tst", int(time.time()))
+
+    ultima_posicao[nome] = {
+        "lat": data.get("lat"),
+        "lon": data.get("lon"),
+        "vel": vel_ms,
+        "cog": data.get("cog", 0),
+        "batt": data.get("batt"),
+        "wifi": wifi_nome,
+        "timestamp": timestamp
+    }
+
+    # ==============================
+    # Remote Configuration
+    # ==============================
+    if parado:
+        config = {
+            "_type": "configuration",
+            "mode": 3,
+            "interval": 300,     # 5 minutos parado
+            "accuracy": 100,
+            "keepalive": 60
+        }
+    else:
+        config = {
+            "_type": "configuration",
+            "mode": 3,
+            "interval": 60,      # 1 minuto em movimento
+            "accuracy": 50,
+            "keepalive": 30
         }
 
-    return jsonify({"status": "ok"})
+    return jsonify(config)
+
+# ==============================
+# Health check
+# ==============================
+@app.route("/", methods=["GET"])
+def health():
+    return "OwnTracks endpoint ativo", 200
 
 # ==============================
 # Primeira resposta
@@ -92,7 +128,8 @@ def onde_esta(nome):
     pos = ultima_posicao[nome]
     rua = latlon_para_rua(pos["lat"], pos["lon"])
 
-    parado = pos["vel"] <= 0.5
+    vel_kmh = pos["vel"] * 3.6
+    parado = vel_kmh <= 6
 
     if parado:
         resposta = f"{nome.capitalize()} está parado próximo da {rua}."
