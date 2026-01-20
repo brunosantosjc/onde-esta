@@ -94,23 +94,22 @@ def distancia_metros(lat1, lon1, lat2, lon2):
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def formatar_tempo(segundos):
-    minutos_totais = max(1, int(segundos / 60))
+    minutos = max(1, int(segundos / 60))
 
-    if minutos_totais < 60:
-        return f"{minutos_totais} minuto{'s' if minutos_totais != 1 else ''}"
+    if minutos < 60:
+        return f"{minutos} minuto{'s' if minutos != 1 else ''}"
 
-    horas = minutos_totais // 60
-    minutos = minutos_totais % 60
+    horas = minutos // 60
+    resto = minutos % 60
 
     texto = f"{horas} hora{'s' if horas != 1 else ''}"
-
-    if minutos > 0:
-        texto += f" e {minutos} minuto{'s' if minutos != 1 else ''}"
+    if resto:
+        texto += f" e {resto} minuto{'s' if resto != 1 else ''}"
 
     return texto
 
 # ==============================
-# Reverse Geocoding (COM CACHE)
+# Reverse Geocoding (fallback inteligente)
 # ==============================
 def latlon_para_rua(lat, lon):
     try:
@@ -119,10 +118,11 @@ def latlon_para_rua(lat, lon):
             "lat": lat,
             "lon": lon,
             "format": "json",
-            "addressdetails": 1
+            "addressdetails": 1,
+            "zoom": 18
         }
         headers = {
-            "User-Agent": "AlexaOndeEsta/1.0 (contato: seuemail@exemplo.com)"
+            "User-Agent": "OndeEsta/1.0 (contact: bruno.bolseiro@gmail.com)"
         }
 
         r = requests.get(url, params=params, headers=headers, timeout=10)
@@ -131,11 +131,22 @@ def latlon_para_rua(lat, lon):
 
         address = data.get("address", {})
         rua = address.get("road")
-        bairro = address.get("suburb")
-        cidade = address.get("city") or address.get("town")
+        bairro = address.get("suburb") or address.get("neighbourhood")
+        cidade = (
+            address.get("city")
+            or address.get("town")
+            or address.get("municipality")
+        )
 
-        partes = [p for p in [rua, bairro, cidade] if p]
-        return ", ".join(partes) if partes else None
+        if rua:
+            return rua
+
+        partes = [p for p in [bairro, cidade] if p]
+        if partes:
+            return ", ".join(partes)
+
+        return None
+
     except Exception:
         return None
 
@@ -192,7 +203,9 @@ def owntracks_webhook():
                 cog = anterior["cog"]
 
             if dist > 50:
-                rua_cache = latlon_para_rua(lat, lon)
+                novo_local = latlon_para_rua(lat, lon)
+                if novo_local:
+                    rua_cache = novo_local
 
     if not rua_cache:
         rua_cache = latlon_para_rua(lat, lon)
@@ -251,12 +264,15 @@ def onde_esta(nome):
     vel_kmh = pos["vel"] * 3.6
     parado = vel_kmh <= 6
 
-    local = rua if rua else "nessa região"
+    if rua:
+        local = f"de {rua}"
+    else:
+        local = "dessa região"
 
     if parado:
-        resposta = f"{nome.capitalize()} está parado próximo de {local}."
+        resposta = f"{nome.capitalize()} está parado próximo {local}."
     else:
-        resposta = f"{nome.capitalize()} está passando próximo de {local}."
+        resposta = f"{nome.capitalize()} está passando próximo {local}."
 
     return jsonify({"resposta": resposta})
 
