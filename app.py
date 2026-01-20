@@ -300,6 +300,25 @@ def detalhes(nome):
     return jsonify({"detalhes": texto})
 
 # ==============================
+# Delete
+# ==============================
+
+@app.route("/admin/delete/<nome>")
+def delete_nome(nome):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "DELETE FROM ultima_posicao WHERE nome = ?",
+            (nome.lower(),)
+        )
+        conn.commit()
+
+    return {
+        "status": "ok",
+        "deleted": nome.lower()
+    }
+
+
+# ==============================
 # Inicialização
 # ==============================
 init_db()
