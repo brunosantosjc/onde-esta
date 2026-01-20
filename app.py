@@ -36,7 +36,8 @@ def init_db():
                 vel REAL,
                 cog REAL,
                 batt INTEGER,
-                timestamp INTEGER
+                timestamp INTEGER,
+                rua_cache TEXT
             )
         """)
         conn.commit()
@@ -44,15 +45,16 @@ def init_db():
 def salvar_posicao(nome, data):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            INSERT INTO ultima_posicao (nome, lat, lon, vel, cog, batt, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ultima_posicao (nome, lat, lon, vel, cog, batt, timestamp, rua_cache)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(nome) DO UPDATE SET
                 lat=excluded.lat,
                 lon=excluded.lon,
                 vel=excluded.vel,
                 cog=excluded.cog,
                 batt=excluded.batt,
-                timestamp=excluded.timestamp
+                timestamp=excluded.timestamp,
+                rua_cache=excluded.rua_cache
         """, (
             nome,
             data["lat"],
@@ -60,7 +62,8 @@ def salvar_posicao(nome, data):
             data["vel"],
             data["cog"],
             data["batt"],
-            data["timestamp"]
+            data["timestamp"],
+            data.get("rua_cache")
         ))
         conn.commit()
 
@@ -91,7 +94,7 @@ def distancia_metros(lat1, lon1, lat2, lon2):
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 # ==============================
-# Reverse Geocoding
+# Reverse Geocoding (COM CACHE)
 # ==============================
 def latlon_para_rua(lat, lon):
     try:
@@ -102,7 +105,10 @@ def latlon_para_rua(lat, lon):
             "format": "json",
             "addressdetails": 1
         }
-        headers = {"User-Agent": "AlexaOndeEsta/1.0"}
+        headers = {
+            "User-Agent": "AlexaOndeEsta/1.0 (contato: seuemail@exemplo.com)"
+        }
+
         r = requests.get(url, params=params, headers=headers, timeout=10)
         r.raise_for_status()
         data = r.json()
@@ -113,9 +119,9 @@ def latlon_para_rua(lat, lon):
         cidade = address.get("city") or address.get("town")
 
         partes = [p for p in [rua, bairro, cidade] if p]
-        return ", ".join(partes) if partes else "localização desconhecida"
+        return ", ".join(partes) if partes else None
     except Exception:
-        return "localização desconhecida"
+        return None
 
 # ==============================
 # Tempo desde última atualização
@@ -154,7 +160,6 @@ def owntracks_webhook():
     if data.get("_type") != "location":
         return jsonify({"status": "ok"})
 
-    # 🔑 USANDO DEVICE ID COMO IDENTIFICADOR
     topic = data.get("topic", "")
     partes = topic.split("/")
 
@@ -170,10 +175,12 @@ def owntracks_webhook():
     batt = data.get("batt")
     timestamp = data.get("tst", int(time.time()))
 
+    anterior = buscar_posicao(nome)
+    rua_cache = anterior["rua_cache"] if anterior else None
+
     # ==============================
     # FILTRO ANTI-SALTO DE GPS
     # ==============================
-    anterior = buscar_posicao(nome)
     if anterior:
         dt = timestamp - anterior["timestamp"]
         if dt > 0:
@@ -187,6 +194,13 @@ def owntracks_webhook():
                 vel_ms = 0
                 cog = anterior["cog"]
 
+            # Atualiza endereço apenas se mover > 50m
+            if dist > 50:
+                rua_cache = latlon_para_rua(lat, lon)
+
+    if not rua_cache:
+        rua_cache = latlon_para_rua(lat, lon)
+
     vel_kmh = vel_ms * 3.6
     parado = vel_kmh <= 6
 
@@ -196,7 +210,8 @@ def owntracks_webhook():
         "vel": vel_ms,
         "cog": cog,
         "batt": batt,
-        "timestamp": timestamp
+        "timestamp": timestamp,
+        "rua_cache": rua_cache
     })
 
     # Remote Configuration
@@ -237,14 +252,16 @@ def onde_esta(nome):
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    rua = latlon_para_rua(pos["lat"], pos["lon"])
+    rua = pos.get("rua_cache")
     vel_kmh = pos["vel"] * 3.6
     parado = vel_kmh <= 6
 
+    local = rua if rua else "nessa região"
+
     if parado:
-        resposta = f"{nome.capitalize()} está parado próximo da {rua}."
+        resposta = f"{nome.capitalize()} está parado próximo de {local}."
     else:
-        resposta = f"{nome.capitalize()} está passando próximo da {rua}."
+        resposta = f"{nome.capitalize()} está passando próximo de {local}."
 
     return jsonify({"resposta": resposta})
 
