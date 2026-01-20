@@ -139,9 +139,14 @@ def owntracks_webhook():
     if data.get("_type") != "location":
         return jsonify({"status": "ok"})
 
+    # 🔑 USANDO DEVICE ID COMO IDENTIFICADOR
     topic = data.get("topic", "")
     partes = topic.split("/")
-    nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
+
+    if len(partes) < 3:
+        return jsonify({"erro": "Topic inválido"}), 400
+
+    nome = partes[2].lower()  # DEVICE ID
 
     lat = data.get("lat")
     lon = data.get("lon")
