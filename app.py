@@ -1,30 +1,90 @@
 from flask import Flask, request, jsonify
 import requests
 import time
+import sqlite3
+import os
 
 app = Flask(__name__)
 
-ultima_posicao = {}
+DB_PATH = "localizacoes.db"
+
+# ==============================
+# Banco de Dados
+# ==============================
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ultima_posicao (
+                nome TEXT PRIMARY KEY,
+                lat REAL,
+                lon REAL,
+                vel REAL,
+                cog REAL,
+                batt INTEGER,
+                timestamp INTEGER
+            )
+        """)
+        conn.commit()
+
+def salvar_posicao(nome, data):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO ultima_posicao (nome, lat, lon, vel, cog, batt, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(nome) DO UPDATE SET
+                lat=excluded.lat,
+                lon=excluded.lon,
+                vel=excluded.vel,
+                cog=excluded.cog,
+                batt=excluded.batt,
+                timestamp=excluded.timestamp
+        """, (
+            nome,
+            data["lat"],
+            data["lon"],
+            data["vel"],
+            data["cog"],
+            data["batt"],
+            data["timestamp"]
+        ))
+        conn.commit()
+
+def buscar_posicao(nome):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT * FROM ultima_posicao WHERE nome = ?",
+            (nome,)
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
 
 # ==============================
 # Reverse Geocoding
 # ==============================
 def latlon_para_rua(lat, lon):
-    url = "https://nominatim.openstreetmap.org/reverse"
-    params = {"lat": lat, "lon": lon, "format": "json", "addressdetails": 1}
-    headers = {"User-Agent": "AlexaOndeEsta/1.0"}
+    try:
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {
+            "lat": lat,
+            "lon": lon,
+            "format": "json",
+            "addressdetails": 1
+        }
+        headers = {"User-Agent": "AlexaOndeEsta/1.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
 
-    r = requests.get(url, params=params, headers=headers, timeout=10)
-    r.raise_for_status()
-    data = r.json()
+        address = data.get("address", {})
+        rua = address.get("road")
+        bairro = address.get("suburb")
+        cidade = address.get("city") or address.get("town")
 
-    address = data.get("address", {})
-    rua = address.get("road")
-    bairro = address.get("suburb")
-    cidade = address.get("city") or address.get("town")
-
-    partes = [p for p in [rua, bairro, cidade] if p]
-    return ", ".join(partes) if partes else "localização desconhecida"
+        partes = [p for p in [rua, bairro, cidade] if p]
+        return ", ".join(partes) if partes else "localização desconhecida"
+    except Exception:
+        return "localização desconhecida"
 
 # ==============================
 # Tempo desde última atualização
@@ -43,7 +103,7 @@ def tempo_desde(timestamp):
         return f"há {horas} hora{'s' if horas > 1 else ''} atrás"
 
 # ==============================
-# Direção em pontos cardeais
+# Direção
 # ==============================
 def grau_para_direcao(cog):
     direcoes = [
@@ -73,23 +133,21 @@ def owntracks_webhook():
 
     timestamp = data.get("tst", int(time.time()))
 
-    ultima_posicao[nome] = {
+    salvar_posicao(nome, {
         "lat": data.get("lat"),
         "lon": data.get("lon"),
         "vel": vel_ms,
         "cog": data.get("cog", 0),
         "batt": data.get("batt"),
         "timestamp": timestamp
-    }
+    })
 
-    # ==============================
     # Remote Configuration
-    # ==============================
     if parado:
         config = {
             "_type": "configuration",
             "mode": 3,
-            "interval": 300,     # 5 minutos parado
+            "interval": 300,
             "accuracy": 100,
             "keepalive": 60
         }
@@ -97,7 +155,7 @@ def owntracks_webhook():
         config = {
             "_type": "configuration",
             "mode": 3,
-            "interval": 60,      # 1 minuto em movimento
+            "interval": 60,
             "accuracy": 50,
             "keepalive": 30
         }
@@ -117,12 +175,12 @@ def health():
 @app.route("/where/<nome>")
 def onde_esta(nome):
     nome = nome.lower()
-    if nome not in ultima_posicao:
+    pos = buscar_posicao(nome)
+
+    if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    pos = ultima_posicao[nome]
     rua = latlon_para_rua(pos["lat"], pos["lon"])
-
     vel_kmh = pos["vel"] * 3.6
     parado = vel_kmh <= 6
 
@@ -139,30 +197,35 @@ def onde_esta(nome):
 @app.route("/details/<nome>")
 def detalhes(nome):
     nome = nome.lower()
-    if nome not in ultima_posicao:
+    pos = buscar_posicao(nome)
+
+    if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    pos = ultima_posicao[nome]
     tempo = tempo_desde(pos["timestamp"])
-
     vel_kmh = round(pos["vel"] * 3.6)
     parado = vel_kmh <= 6
 
     if parado:
         minutos = max(1, int((time.time() - pos["timestamp"]) / 60))
-        detalhes_texto = (
-            f"Essa pessoa está parada há {minutos} minuto{'s' if minutos > 1 else ''} "
-            f"no mesmo local, a bateria do celular está com {pos['batt']}% de carga."
+        texto = (
+            f"Essa pessoa está parada há {minutos} minuto{'s' if minutos > 1 else ''}, "
+            f"a bateria do celular está com {pos['batt']}% de carga."
         )
     else:
         direcao = grau_para_direcao(pos["cog"])
-        detalhes_texto = (
-            f"Essa pessoa está em movimento a uma velocidade de {vel_kmh} km por hora, "
-            f"indo para o {direcao}, a bateria do celular está com {pos['batt']}% de carga. "
+        texto = (
+            f"Essa pessoa está em movimento a {vel_kmh} km por hora, "
+            f"indo para o {direcao}, a bateria está com {pos['batt']}% de carga. "
             f"Última atualização {tempo}."
         )
 
-    return jsonify({"detalhes": detalhes_texto})
+    return jsonify({"detalhes": texto})
+
+# ==============================
+# Inicialização
+# ==============================
+init_db()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
