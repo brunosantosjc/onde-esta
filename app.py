@@ -109,7 +109,7 @@ def formatar_tempo(segundos):
     return texto
 
 # ==============================
-# Reverse Geocoding (fallback inteligente)
+# Reverse Geocoding (rua + bairro + cidade)
 # ==============================
 def latlon_para_rua(lat, lon):
     try:
@@ -130,6 +130,7 @@ def latlon_para_rua(lat, lon):
         data = r.json()
 
         address = data.get("address", {})
+
         rua = address.get("road")
         bairro = address.get("suburb") or address.get("neighbourhood")
         cidade = (
@@ -138,14 +139,8 @@ def latlon_para_rua(lat, lon):
             or address.get("municipality")
         )
 
-        if rua:
-            return rua
-
-        partes = [p for p in [bairro, cidade] if p]
-        if partes:
-            return ", ".join(partes)
-
-        return None
+        partes = [p for p in [rua, bairro, cidade] if p]
+        return ", ".join(partes) if partes else None
 
     except Exception:
         return None
@@ -260,19 +255,15 @@ def onde_esta(nome):
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    rua = pos.get("rua_cache")
+    local = pos.get("rua_cache") or "essa região"
+
     vel_kmh = pos["vel"] * 3.6
     parado = vel_kmh <= 6
 
-    if rua:
-        local = f"de {rua}"
-    else:
-        local = "dessa região"
-
     if parado:
-        resposta = f"{nome.capitalize()} está parado próximo {local}."
+        resposta = f"{nome.capitalize()} está parado próximo de {local}."
     else:
-        resposta = f"{nome.capitalize()} está passando próximo {local}."
+        resposta = f"{nome.capitalize()} está passando próximo de {local}."
 
     return jsonify({"resposta": resposta})
 
