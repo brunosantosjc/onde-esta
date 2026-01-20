@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify
 import requests
 import time
 import sqlite3
-import os
+import math
 
 app = Flask(__name__)
 
@@ -58,6 +58,22 @@ def buscar_posicao(nome):
         )
         row = cur.fetchone()
         return dict(row) if row else None
+
+# ==============================
+# Utilidades
+# ==============================
+def distancia_metros(lat1, lon1, lat2, lon2):
+    R = 6371000
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+
+    a = (
+        math.sin(dphi / 2) ** 2 +
+        math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    )
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 # ==============================
 # Reverse Geocoding
@@ -127,18 +143,39 @@ def owntracks_webhook():
     partes = topic.split("/")
     nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
 
+    lat = data.get("lat")
+    lon = data.get("lon")
     vel_ms = data.get("vel", 0) or 0
+    cog = data.get("cog", 0)
+    batt = data.get("batt")
+    timestamp = data.get("tst", int(time.time()))
+
+    # ==============================
+    # FILTRO ANTI-SALTO DE GPS
+    # ==============================
+    anterior = buscar_posicao(nome)
+    if anterior:
+        dt = timestamp - anterior["timestamp"]
+        if dt > 0:
+            dist = distancia_metros(
+                anterior["lat"], anterior["lon"],
+                lat, lon
+            )
+            vel_calc_kmh = (dist / dt) * 3.6
+
+            if dist < 80 and dt < 5 and vel_calc_kmh > 15:
+                vel_ms = 0
+                cog = anterior["cog"]
+
     vel_kmh = vel_ms * 3.6
     parado = vel_kmh <= 6
 
-    timestamp = data.get("tst", int(time.time()))
-
     salvar_posicao(nome, {
-        "lat": data.get("lat"),
-        "lon": data.get("lon"),
+        "lat": lat,
+        "lon": lon,
         "vel": vel_ms,
-        "cog": data.get("cog", 0),
-        "batt": data.get("batt"),
+        "cog": cog,
+        "batt": batt,
         "timestamp": timestamp
     })
 
