@@ -9,6 +9,21 @@ app = Flask(__name__)
 DB_PATH = "localizacoes.db"
 
 # ==============================
+# DEBUG – ver dados salvos
+# ==============================
+@app.route("/debug", methods=["GET"])
+def debug():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM ultima_posicao")
+        rows = cur.fetchall()
+
+    return jsonify({
+        "total_registros": len(rows),
+        "dados": [dict(r) for r in rows]
+    })
+
+# ==============================
 # Banco de Dados
 # ==============================
 def init_db():
