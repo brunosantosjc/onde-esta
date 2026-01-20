@@ -1,7 +1,6 @@
 from flask import Flask, request, jsonify
 import requests
 import time
-import math
 
 app = Flask(__name__)
 
@@ -66,13 +65,16 @@ def owntracks_webhook():
     nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
 
     if data.get("_type") == "location":
+        ssid = data.get("ssid")
+        wifi_nome = ssid if ssid else "Wi-Fi desconhecido"
+
         ultima_posicao[nome] = {
             "lat": data.get("lat"),
             "lon": data.get("lon"),
             "vel": data.get("vel", 0),  # m/s
             "cog": data.get("cog", 0),
             "batt": data.get("batt"),
-            "rede": data.get("ssid"),
+            "wifi": wifi_nome,
             "timestamp": data.get("tst", int(time.time()))
         }
 
@@ -119,7 +121,7 @@ def detalhes(nome):
         detalhes_texto = (
             f"Essa pessoa está parada há {minutos} minuto{'s' if minutos > 1 else ''} "
             f"no mesmo local, a bateria do celular está com {pos['batt']}% de carga, "
-            f"conectado ao wi-fi {pos['rede']}."
+            f"conectado ao wi-fi {pos['wifi']}."
         )
     else:
         direcao = grau_para_direcao(pos["cog"])
