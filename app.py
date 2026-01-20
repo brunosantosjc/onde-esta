@@ -93,6 +93,22 @@ def distancia_metros(lat1, lon1, lat2, lon2):
     )
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+def formatar_tempo(segundos):
+    minutos_totais = max(1, int(segundos / 60))
+
+    if minutos_totais < 60:
+        return f"{minutos_totais} minuto{'s' if minutos_totais != 1 else ''}"
+
+    horas = minutos_totais // 60
+    minutos = minutos_totais % 60
+
+    texto = f"{horas} hora{'s' if horas != 1 else ''}"
+
+    if minutos > 0:
+        texto += f" e {minutos} minuto{'s' if minutos != 1 else ''}"
+
+    return texto
+
 # ==============================
 # Reverse Geocoding (COM CACHE)
 # ==============================
@@ -124,22 +140,6 @@ def latlon_para_rua(lat, lon):
         return None
 
 # ==============================
-# Tempo desde última atualização
-# ==============================
-def tempo_desde(timestamp):
-    agora = int(time.time())
-    diff = agora - timestamp
-
-    if diff < 60:
-        return "agora"
-    elif diff < 3600:
-        minutos = diff // 60
-        return f"há {minutos} minuto{'s' if minutos > 1 else ''} atrás"
-    else:
-        horas = diff // 3600
-        return f"há {horas} hora{'s' if horas > 1 else ''} atrás"
-
-# ==============================
 # Direção
 # ==============================
 def grau_para_direcao(cog):
@@ -166,7 +166,7 @@ def owntracks_webhook():
     if len(partes) < 3:
         return jsonify({"erro": "Topic inválido"}), 400
 
-    nome = partes[2].lower()  # DEVICE ID
+    nome = partes[2].lower()
 
     lat = data.get("lat")
     lon = data.get("lon")
@@ -178,9 +178,6 @@ def owntracks_webhook():
     anterior = buscar_posicao(nome)
     rua_cache = anterior["rua_cache"] if anterior else None
 
-    # ==============================
-    # FILTRO ANTI-SALTO DE GPS
-    # ==============================
     if anterior:
         dt = timestamp - anterior["timestamp"]
         if dt > 0:
@@ -194,7 +191,6 @@ def owntracks_webhook():
                 vel_ms = 0
                 cog = anterior["cog"]
 
-            # Atualiza endereço apenas se mover > 50m
             if dist > 50:
                 rua_cache = latlon_para_rua(lat, lon)
 
@@ -214,7 +210,6 @@ def owntracks_webhook():
         "rua_cache": rua_cache
     })
 
-    # Remote Configuration
     if parado:
         config = {
             "_type": "configuration",
@@ -276,14 +271,15 @@ def detalhes(nome):
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    tempo = tempo_desde(pos["timestamp"])
+    segundos = int(time.time()) - pos["timestamp"]
+    tempo_formatado = formatar_tempo(segundos)
+
     vel_kmh = round(pos["vel"] * 3.6)
     parado = vel_kmh <= 6
 
     if parado:
-        minutos = max(1, int((time.time() - pos["timestamp"]) / 60))
         texto = (
-            f"Essa pessoa está parada há {minutos} minuto{'s' if minutos > 1 else ''}, "
+            f"Essa pessoa está parada há {tempo_formatado}, "
             f"a bateria do celular está com {pos['batt']}% de carga."
         )
     else:
@@ -291,7 +287,7 @@ def detalhes(nome):
         texto = (
             f"Essa pessoa está em movimento a {vel_kmh} km por hora, "
             f"indo para o {direcao}, a bateria está com {pos['batt']}% de carga. "
-            f"Última atualização {tempo}."
+            f"Última atualização há {tempo_formatado}."
         )
 
     return jsonify({"detalhes": texto})
