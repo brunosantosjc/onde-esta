@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
 import time
+import math
 
 app = Flask(__name__)
 
@@ -27,11 +28,12 @@ def latlon_para_rua(lat, lon):
     return ", ".join(partes) if partes else "localização desconhecida"
 
 # ==============================
-# Função para formatar tempo desde última atualização
+# Tempo desde última atualização
 # ==============================
 def tempo_desde(timestamp):
     agora = int(time.time())
     diff = agora - timestamp
+
     if diff < 60:
         return "agora"
     elif diff < 3600:
@@ -40,6 +42,17 @@ def tempo_desde(timestamp):
     else:
         horas = diff // 3600
         return f"há {horas} hora{'s' if horas > 1 else ''} atrás"
+
+# ==============================
+# Direção em pontos cardeais
+# ==============================
+def grau_para_direcao(cog):
+    direcoes = [
+        "norte", "nordeste", "leste", "sudeste",
+        "sul", "sudoeste", "oeste", "noroeste"
+    ]
+    idx = round(cog / 45) % 8
+    return direcoes[idx]
 
 # ==============================
 # Webhook OwnTracks
@@ -56,18 +69,17 @@ def owntracks_webhook():
         ultima_posicao[nome] = {
             "lat": data.get("lat"),
             "lon": data.get("lon"),
-            "vel": data.get("vel", 0),
+            "vel": data.get("vel", 0),  # m/s
             "cog": data.get("cog", 0),
-            "motion": "em movimento" if data.get("m", 0) else "parado",
-            "batt": data.get("batt", None),
-            "rede": "Wi-Fi" if data.get("conn") == "w" else "rede celular",
+            "batt": data.get("batt"),
+            "rede": data.get("ssid"),
             "timestamp": data.get("tst", int(time.time()))
         }
 
     return jsonify({"status": "ok"})
 
 # ==============================
-# Onde está (primeira resposta)
+# Primeira resposta
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -77,19 +89,18 @@ def onde_esta(nome):
 
     pos = ultima_posicao[nome]
     rua = latlon_para_rua(pos["lat"], pos["lon"])
-    tempo = tempo_desde(pos["timestamp"])
 
-    # Se parado, não mostra direção
-    direcao_texto = f", direção {pos['cog']}°" if pos["motion"] != "parado" else ""
+    parado = pos["vel"] <= 0.5
 
-    # Ajuste para começar com "agora" se o tempo for "agora"
-    prefixo_tempo = "agora " if tempo == "agora" else ""
-    primeira_resposta = f"{nome.capitalize()} está {prefixo_tempo}próximo da {rua}{direcao_texto}. Última posição {tempo}."
+    if parado:
+        resposta = f"{nome.capitalize()} está parado próximo da {rua}."
+    else:
+        resposta = f"{nome.capitalize()} está passando próximo da {rua}."
 
-    return jsonify({"nome": nome, "resposta": primeira_resposta, "pos": pos})
+    return jsonify({"resposta": resposta})
 
 # ==============================
-# Detalhes (segunda resposta)
+# Segunda resposta (detalhes)
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
@@ -100,13 +111,25 @@ def detalhes(nome):
     pos = ultima_posicao[nome]
     tempo = tempo_desde(pos["timestamp"])
 
-    detalhes_texto = (
-        f"Ele está {pos['motion']}, velocidade {pos['vel']} m/s"
-        + (f", direção {pos['cog']}°" if pos["motion"] != "parado" else "")
-        + f", bateria {pos['batt']}%, conectado à {pos['rede']}. Última atualização {tempo}."
-    )
+    vel_kmh = round(pos["vel"] * 3.6)
+    parado = vel_kmh <= 6
 
-    return jsonify({"nome": nome, "detalhes": detalhes_texto})
+    if parado:
+        minutos = max(1, int((time.time() - pos["timestamp"]) / 60))
+        detalhes_texto = (
+            f"Essa pessoa está parada há {minutos} minuto{'s' if minutos > 1 else ''} "
+            f"no mesmo local, a bateria do celular está com {pos['batt']}% de carga, "
+            f"conectado ao wi-fi {pos['rede']}."
+        )
+    else:
+        direcao = grau_para_direcao(pos["cog"])
+        detalhes_texto = (
+            f"Essa pessoa está em movimento a uma velocidade de {vel_kmh} km por hora, "
+            f"indo para o {direcao}, a bateria do celular está com {pos['batt']}% de carga. "
+            f"Última atualização {tempo}."
+        )
+
+    return jsonify({"detalhes": detalhes_texto})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
