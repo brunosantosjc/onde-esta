@@ -67,10 +67,6 @@ def owntracks_webhook():
     partes = topic.split("/")
     nome = partes[1].lower() if len(partes) >= 2 else "desconhecido"
 
-    # Wi-Fi corrigido (evita None)
-    ssid = data.get("ssid")
-    wifi_nome = ssid if ssid and ssid.lower() != "none" else "Wi-Fi desconhecido"
-
     vel_ms = data.get("vel", 0) or 0
     vel_kmh = vel_ms * 3.6
     parado = vel_kmh <= 6
@@ -83,7 +79,6 @@ def owntracks_webhook():
         "vel": vel_ms,
         "cog": data.get("cog", 0),
         "batt": data.get("batt"),
-        "wifi": wifi_nome,
         "timestamp": timestamp
     }
 
@@ -157,8 +152,7 @@ def detalhes(nome):
         minutos = max(1, int((time.time() - pos["timestamp"]) / 60))
         detalhes_texto = (
             f"Essa pessoa está parada há {minutos} minuto{'s' if minutos > 1 else ''} "
-            f"no mesmo local, a bateria do celular está com {pos['batt']}% de carga, "
-            f"conectado ao wi-fi {pos['wifi']}."
+            f"no mesmo local, a bateria do celular está com {pos['batt']}% de carga."
         )
     else:
         direcao = grau_para_direcao(pos["cog"])
