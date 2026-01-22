@@ -328,14 +328,20 @@ def detalhes(nome):
 # ==============================
 @app.route("/regioes", methods=["GET"])
 def listar_regioes():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM regioes")
-        regioes = cur.fetchall()
-    return jsonify({
-        "total": len(regioes),
-        "regioes": [dict(r) for r in regioes]
-    })
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute("SELECT * FROM regioes")
+            regioes = cur.fetchall()
+        return jsonify({
+            "total": len(regioes),
+            "regioes": [dict(r) for r in regioes]
+        })
+    except Exception as e:
+        # Vai mostrar no log do servidor qual foi o erro
+        print("Erro ao listar regiões:", e)
+        return jsonify({"erro": "Falha ao buscar regiões", "detalhes": str(e)}), 500
+
 
 
 # ==============================
