@@ -172,7 +172,7 @@ def owntracks_webhook():
     if data.get("_type") != "location":
         return jsonify({"status": "ok"})
 
-    CACHE_RUA_MAX = 15 * 60  # 15 minutos
+    CACHE_RUA_MAX = 15 * 60
     agora = int(time.time())
 
     topic = data.get("topic", "")
@@ -185,7 +185,7 @@ def owntracks_webhook():
 
     lat = data.get("lat")
     lon = data.get("lon")
-    vel_ms = data.get("vel", 0) or 0
+    vel_ot_ms = data.get("vel", 0) or 0
     cog = data.get("cog", 0)
     batt = data.get("batt")
     timestamp = data.get("tst", agora)
@@ -194,6 +194,8 @@ def owntracks_webhook():
 
     rua_cache = anterior.get("rua_cache") if anterior else None
     rua_cache_ts = anterior.get("rua_cache_ts") if anterior else None
+
+    vel_final_ms = vel_ot_ms
 
     if anterior:
         dt = timestamp - anterior["timestamp"]
@@ -204,20 +206,31 @@ def owntracks_webhook():
                 lat, lon
             )
 
-            vel_calc_kmh = (dist / dt) * 3.6
+            vel_calc_ms = dist / dt if dt >= 10 else 0
+            vel_calc_kmh = vel_calc_ms * 3.6
+            vel_ot_kmh = vel_ot_ms * 3.6
+
+            # Decisão de confiança
+            if (
+                vel_ot_kmh > 5
+                and dt >= 10
+                and vel_ot_kmh < 160
+            ):
+                vel_final_ms = vel_ot_ms
+            elif vel_calc_kmh < 160:
+                vel_final_ms = vel_calc_ms
+            else:
+                vel_final_ms = 0
 
             # Proteção contra GPS maluco
             if dist < 80 and dt < 5 and vel_calc_kmh > 15:
-                vel_ms = 0
+                vel_final_ms = 0
                 cog = anterior["cog"]
 
             precisa_atualizar_rua = False
 
-            # Atualiza se mudou de lugar
             if dist > 50:
                 precisa_atualizar_rua = True
-
-            # Ou se o cache está velho
             elif not rua_cache_ts or (agora - rua_cache_ts) > CACHE_RUA_MAX:
                 precisa_atualizar_rua = True
 
@@ -227,18 +240,17 @@ def owntracks_webhook():
                     rua_cache = novo_local
                     rua_cache_ts = agora
 
-    # Primeira resolução de endereço
     if not rua_cache:
         rua_cache = latlon_para_rua(lat, lon)
         rua_cache_ts = agora
 
-    vel_kmh = vel_ms * 3.6
+    vel_kmh = vel_final_ms * 3.6
     parado = vel_kmh <= 6
 
     salvar_posicao(nome, {
         "lat": lat,
         "lon": lon,
-        "vel": vel_ms,
+        "vel": vel_final_ms,
         "cog": cog,
         "batt": batt,
         "timestamp": timestamp,
@@ -246,7 +258,6 @@ def owntracks_webhook():
         "rua_cache_ts": rua_cache_ts
     })
 
-    # Configuração remota OwnTracks
     if parado:
         config = {
             "_type": "configuration",
