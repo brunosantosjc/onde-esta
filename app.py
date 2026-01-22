@@ -324,6 +324,21 @@ def detalhes(nome):
     return jsonify({"detalhes": texto})
 
 # ==============================
+# Listar todas as regiões
+# ==============================
+@app.route("/regioes", methods=["GET"])
+def listar_regioes():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM regioes")
+        regioes = cur.fetchall()
+    return jsonify({
+        "total": len(regioes),
+        "regioes": [dict(r) for r in regioes]
+    })
+
+
+# ==============================
 # Init
 # ==============================
 init_db()
