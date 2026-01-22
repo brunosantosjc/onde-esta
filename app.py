@@ -37,7 +37,8 @@ def init_db():
                 cog REAL,
                 batt INTEGER,
                 timestamp INTEGER,
-                rua_cache TEXT
+                rua_cache TEXT,
+                rua_cache_ts INTEGER
             )
         """)
         conn.commit()
@@ -45,8 +46,11 @@ def init_db():
 def salvar_posicao(nome, data):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
-            INSERT INTO ultima_posicao (nome, lat, lon, vel, cog, batt, timestamp, rua_cache)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO ultima_posicao (
+                nome, lat, lon, vel, cog, batt,
+                timestamp, rua_cache, rua_cache_ts
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(nome) DO UPDATE SET
                 lat=excluded.lat,
                 lon=excluded.lon,
@@ -54,7 +58,8 @@ def salvar_posicao(nome, data):
                 cog=excluded.cog,
                 batt=excluded.batt,
                 timestamp=excluded.timestamp,
-                rua_cache=excluded.rua_cache
+                rua_cache=excluded.rua_cache,
+                rua_cache_ts=excluded.rua_cache_ts
         """, (
             nome,
             data["lat"],
@@ -63,7 +68,8 @@ def salvar_posicao(nome, data):
             data["cog"],
             data["batt"],
             data["timestamp"],
-            data.get("rua_cache")
+            data.get("rua_cache"),
+            data.get("rua_cache_ts")
         ))
         conn.commit()
 
@@ -89,7 +95,8 @@ def distancia_metros(lat1, lon1, lat2, lon2):
 
     a = (
         math.sin(dphi / 2) ** 2 +
-        math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        math.cos(phi1) * math.cos(phi2) *
+        math.sin(dlambda / 2) ** 2
     )
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
@@ -109,7 +116,7 @@ def formatar_tempo(segundos):
     return texto
 
 # ==============================
-# Reverse Geocoding (rua + bairro + cidade)
+# Reverse Geocoding
 # ==============================
 def latlon_para_rua(lat, lon):
     try:
@@ -130,7 +137,6 @@ def latlon_para_rua(lat, lon):
         data = r.json()
 
         address = data.get("address", {})
-
         rua = address.get("road")
         bairro = address.get("suburb") or address.get("neighbourhood")
         cidade = (
@@ -157,7 +163,7 @@ def grau_para_direcao(cog):
     return direcoes[idx]
 
 # ==============================
-# Webhook OwnTracks + Remote Config
+# Webhook OwnTracks
 # ==============================
 @app.route("/", methods=["POST"])
 def owntracks_webhook():
@@ -165,6 +171,9 @@ def owntracks_webhook():
 
     if data.get("_type") != "location":
         return jsonify({"status": "ok"})
+
+    CACHE_RUA_MAX = 15 * 60  # 15 minutos
+    agora = int(time.time())
 
     topic = data.get("topic", "")
     partes = topic.split("/")
@@ -179,31 +188,49 @@ def owntracks_webhook():
     vel_ms = data.get("vel", 0) or 0
     cog = data.get("cog", 0)
     batt = data.get("batt")
-    timestamp = data.get("tst", int(time.time()))
+    timestamp = data.get("tst", agora)
 
     anterior = buscar_posicao(nome)
-    rua_cache = anterior["rua_cache"] if anterior else None
+
+    rua_cache = anterior.get("rua_cache") if anterior else None
+    rua_cache_ts = anterior.get("rua_cache_ts") if anterior else None
 
     if anterior:
         dt = timestamp - anterior["timestamp"]
+
         if dt > 0:
             dist = distancia_metros(
                 anterior["lat"], anterior["lon"],
                 lat, lon
             )
+
             vel_calc_kmh = (dist / dt) * 3.6
 
+            # Proteção contra GPS maluco
             if dist < 80 and dt < 5 and vel_calc_kmh > 15:
                 vel_ms = 0
                 cog = anterior["cog"]
 
+            precisa_atualizar_rua = False
+
+            # Atualiza se mudou de lugar
             if dist > 50:
+                precisa_atualizar_rua = True
+
+            # Ou se o cache está velho
+            elif not rua_cache_ts or (agora - rua_cache_ts) > CACHE_RUA_MAX:
+                precisa_atualizar_rua = True
+
+            if precisa_atualizar_rua:
                 novo_local = latlon_para_rua(lat, lon)
                 if novo_local:
                     rua_cache = novo_local
+                    rua_cache_ts = agora
 
+    # Primeira resolução de endereço
     if not rua_cache:
         rua_cache = latlon_para_rua(lat, lon)
+        rua_cache_ts = agora
 
     vel_kmh = vel_ms * 3.6
     parado = vel_kmh <= 6
@@ -215,9 +242,11 @@ def owntracks_webhook():
         "cog": cog,
         "batt": batt,
         "timestamp": timestamp,
-        "rua_cache": rua_cache
+        "rua_cache": rua_cache,
+        "rua_cache_ts": rua_cache_ts
     })
 
+    # Configuração remota OwnTracks
     if parado:
         config = {
             "_type": "configuration",
@@ -268,7 +297,7 @@ def onde_esta(nome):
     return jsonify({"resposta": resposta})
 
 # ==============================
-# Segunda resposta (detalhes)
+# Segunda resposta
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
@@ -298,7 +327,6 @@ def detalhes(nome):
         )
 
     return jsonify({"detalhes": texto})
-
 
 # ==============================
 # Inicialização
