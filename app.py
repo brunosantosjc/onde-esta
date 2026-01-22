@@ -202,7 +202,7 @@ def owntracks_webhook():
                 lat, lon
             )
 
-            vel_calc_ms = dist / dt if dt >= 10 else 0
+            vel_calc_ms = dist / dt if dt >= 5 else 0
             vel_calc_kmh = vel_calc_ms * 3.6
             vel_ot_kmh = vel_ot_ms * 3.6
 
