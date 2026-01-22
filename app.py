@@ -9,7 +9,7 @@ app = Flask(__name__)
 DB_PATH = "localizacoes.db"
 
 # ==============================
-# DEBUG – ver dados salvos
+# DEBUG
 # ==============================
 @app.route("/debug", methods=["GET"])
 def debug():
@@ -38,7 +38,8 @@ def init_db():
                 batt INTEGER,
                 timestamp INTEGER,
                 rua_cache TEXT,
-                rua_cache_ts INTEGER
+                rua_cache_ts INTEGER,
+                estado_movimento TEXT
             )
         """)
         conn.commit()
@@ -48,9 +49,9 @@ def salvar_posicao(nome, data):
         conn.execute("""
             INSERT INTO ultima_posicao (
                 nome, lat, lon, vel, cog, batt,
-                timestamp, rua_cache, rua_cache_ts
+                timestamp, rua_cache, rua_cache_ts, estado_movimento
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(nome) DO UPDATE SET
                 lat=excluded.lat,
                 lon=excluded.lon,
@@ -59,7 +60,8 @@ def salvar_posicao(nome, data):
                 batt=excluded.batt,
                 timestamp=excluded.timestamp,
                 rua_cache=excluded.rua_cache,
-                rua_cache_ts=excluded.rua_cache_ts
+                rua_cache_ts=excluded.rua_cache_ts,
+                estado_movimento=excluded.estado_movimento
         """, (
             nome,
             data["lat"],
@@ -69,7 +71,8 @@ def salvar_posicao(nome, data):
             data["batt"],
             data["timestamp"],
             data.get("rua_cache"),
-            data.get("rua_cache_ts")
+            data.get("rua_cache_ts"),
+            data.get("estado_movimento")
         ))
         conn.commit()
 
@@ -102,17 +105,13 @@ def distancia_metros(lat1, lon1, lat2, lon2):
 
 def formatar_tempo(segundos):
     minutos = max(1, int(segundos / 60))
-
     if minutos < 60:
         return f"{minutos} minuto{'s' if minutos != 1 else ''}"
-
     horas = minutos // 60
     resto = minutos % 60
-
     texto = f"{horas} hora{'s' if horas != 1 else ''}"
     if resto:
         texto += f" e {resto} minuto{'s' if resto != 1 else ''}"
-
     return texto
 
 # ==============================
@@ -129,7 +128,7 @@ def latlon_para_rua(lat, lon):
             "zoom": 18
         }
         headers = {
-            "User-Agent": "OndeEsta/1.0 (contact: bruno.bolseiro@gmail.com)"
+            "User-Agent": "OndeEsta/1.0"
         }
 
         r = requests.get(url, params=params, headers=headers, timeout=10)
@@ -139,11 +138,7 @@ def latlon_para_rua(lat, lon):
         address = data.get("address", {})
         rua = address.get("road")
         bairro = address.get("suburb") or address.get("neighbourhood")
-        cidade = (
-            address.get("city")
-            or address.get("town")
-            or address.get("municipality")
-        )
+        cidade = address.get("city") or address.get("town")
 
         partes = [p for p in [rua, bairro, cidade] if p]
         return ", ".join(partes) if partes else None
@@ -172,12 +167,11 @@ def owntracks_webhook():
     if data.get("_type") != "location":
         return jsonify({"status": "ok"})
 
-    CACHE_RUA_MAX = 15 * 60
     agora = int(time.time())
+    CACHE_RUA_MAX = 15 * 60
 
     topic = data.get("topic", "")
     partes = topic.split("/")
-
     if len(partes) < 3:
         return jsonify({"erro": "Topic inválido"}), 400
 
@@ -194,8 +188,10 @@ def owntracks_webhook():
 
     rua_cache = anterior.get("rua_cache") if anterior else None
     rua_cache_ts = anterior.get("rua_cache_ts") if anterior else None
+    estado_anterior = anterior.get("estado_movimento") if anterior else "parado"
 
     vel_final_ms = vel_ot_ms
+    estado_movimento = estado_anterior
 
     if anterior:
         dt = timestamp - anterior["timestamp"]
@@ -210,25 +206,33 @@ def owntracks_webhook():
             vel_calc_kmh = vel_calc_ms * 3.6
             vel_ot_kmh = vel_ot_ms * 3.6
 
-            # Decisão de confiança
-            if (
-                vel_ot_kmh > 5
-                and dt >= 10
-                and vel_ot_kmh < 160
-            ):
+            # -------- VELOCIDADE FINAL --------
+            if 5 < vel_ot_kmh < 160:
                 vel_final_ms = vel_ot_ms
             elif vel_calc_kmh < 160:
                 vel_final_ms = vel_calc_ms
             else:
                 vel_final_ms = 0
 
-            # Proteção contra GPS maluco
-            if dist < 80 and dt < 5 and vel_calc_kmh > 15:
-                vel_final_ms = 0
-                cog = anterior["cog"]
+            # -------- DECISÃO 3 CAMADAS --------
+            if estado_anterior == "parado":
+                if dist >= 50 and dt >= 10:
+                    estado_movimento = "movimento"
+                elif vel_ot_kmh >= 8:
+                    estado_movimento = "movimento"
+                else:
+                    estado_movimento = "parado"
 
+            elif estado_anterior == "movimento":
+                if dist < 20 and dt >= 90:
+                    estado_movimento = "parado"
+                elif vel_ot_kmh <= 3:
+                    estado_movimento = "parado"
+                else:
+                    estado_movimento = "movimento"
+
+            # -------- RUA CACHE --------
             precisa_atualizar_rua = False
-
             if dist > 50:
                 precisa_atualizar_rua = True
             elif not rua_cache_ts or (agora - rua_cache_ts) > CACHE_RUA_MAX:
@@ -244,9 +248,6 @@ def owntracks_webhook():
         rua_cache = latlon_para_rua(lat, lon)
         rua_cache_ts = agora
 
-    vel_kmh = vel_final_ms * 3.6
-    parado = vel_kmh <= 6
-
     salvar_posicao(nome, {
         "lat": lat,
         "lon": lon,
@@ -255,30 +256,22 @@ def owntracks_webhook():
         "batt": batt,
         "timestamp": timestamp,
         "rua_cache": rua_cache,
-        "rua_cache_ts": rua_cache_ts
+        "rua_cache_ts": rua_cache_ts,
+        "estado_movimento": estado_movimento
     })
 
-    if parado:
-        config = {
-            "_type": "configuration",
-            "mode": 3,
-            "interval": 300,
-            "accuracy": 100,
-            "keepalive": 60
-        }
-    else:
-        config = {
-            "_type": "configuration",
-            "mode": 3,
-            "interval": 60,
-            "accuracy": 50,
-            "keepalive": 30
-        }
+    config = {
+        "_type": "configuration",
+        "mode": 3,
+        "interval": 60 if estado_movimento == "movimento" else 300,
+        "accuracy": 50 if estado_movimento == "movimento" else 100,
+        "keepalive": 30 if estado_movimento == "movimento" else 60
+    }
 
     return jsonify(config)
 
 # ==============================
-# Health check
+# Health
 # ==============================
 @app.route("/", methods=["GET"])
 def health():
@@ -289,58 +282,49 @@ def health():
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
-    nome = nome.lower()
-    pos = buscar_posicao(nome)
-
+    pos = buscar_posicao(nome.lower())
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
     local = pos.get("rua_cache") or "essa região"
 
-    vel_kmh = pos["vel"] * 3.6
-    parado = vel_kmh <= 6
-
-    if parado:
-        resposta = f"{nome.capitalize()} está parado próximo de {local}."
+    if pos["estado_movimento"] == "parado":
+        texto = f"{nome.capitalize()} está parado próximo de {local}."
     else:
-        resposta = f"{nome.capitalize()} está passando próximo de {local}."
+        texto = f"{nome.capitalize()} está passando próximo de {local}."
 
-    return jsonify({"resposta": resposta})
+    return jsonify({"resposta": texto})
 
 # ==============================
 # Segunda resposta
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
-    nome = nome.lower()
-    pos = buscar_posicao(nome)
-
+    pos = buscar_posicao(nome.lower())
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
     segundos = int(time.time()) - pos["timestamp"]
-    tempo_formatado = formatar_tempo(segundos)
+    tempo = formatar_tempo(segundos)
 
-    vel_kmh = round(pos["vel"] * 3.6)
-    parado = vel_kmh <= 6
-
-    if parado:
+    if pos["estado_movimento"] == "parado":
         texto = (
-            f"Essa pessoa está parada há {tempo_formatado}, "
+            f"Essa pessoa está parada há {tempo}, "
             f"a bateria do celular está com {pos['batt']}% de carga."
         )
     else:
         direcao = grau_para_direcao(pos["cog"])
+        vel_kmh = round(pos["vel"] * 3.6)
         texto = (
             f"Essa pessoa está em movimento a {vel_kmh} km por hora, "
             f"indo para o {direcao}, a bateria está com {pos['batt']}% de carga. "
-            f"Última atualização há {tempo_formatado}."
+            f"Última atualização há {tempo}."
         )
 
     return jsonify({"detalhes": texto})
 
 # ==============================
-# Inicialização
+# Init
 # ==============================
 init_db()
 
