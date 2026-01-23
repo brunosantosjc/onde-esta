@@ -276,7 +276,7 @@ def health():
     return "OwnTracks endpoint ativo", 200
 
 # ==============================
-# /where/<nome>
+# /where/<nome> - ajustado para usar região salva
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -284,7 +284,11 @@ def onde_esta(nome):
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    local = pos.get("rua_cache") or "essa região"
+    lat = pos["lat"]
+    lon = pos["lon"]
+    regioes_atuais = verificar_regioes(lat, lon)
+    local = regioes_atuais[0] if regioes_atuais else pos.get("rua_cache") or "essa região"
+
     estado = pos.get("estado_movimento")
     if estado == "parado":
         texto = f"{nome.capitalize()} está parado próximo de {local}."
@@ -307,7 +311,6 @@ def detalhes(nome):
     lon = pos["lon"]
 
     regioes_atuais = verificar_regioes(lat, lon)
-    # Só pergunta para salvar se estiver parado
     precisa_salvar = len(regioes_atuais) == 0 and estado == "parado"
     local = ", ".join(regioes_atuais) if regioes_atuais else pos.get("rua_cache") or "essa região"
 
