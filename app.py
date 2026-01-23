@@ -91,7 +91,7 @@ def buscar_posicao(nome):
         row = cur.fetchone()
         return dict(row) if row else None
 
-def salvar_regiao(nome, lat, lon, raio_metros=50):
+def salvar_regiao(nome, lat, lon, raio_metros=40):
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             INSERT INTO regioes (nome, lat, lon, raio_metros)
@@ -338,11 +338,16 @@ def salvar_regiao_manual():
     lat = data.get("lat")
     lon = data.get("lon")
 
-    if not nome_regiao or not lat or not lon:
+    if not nome_regiao or lat is None or lon is None:
         return jsonify({"erro": "Dados insuficientes"}), 400
 
-    salvar_regiao(nome_regiao, lat, lon, 50)
-    return jsonify({"status": "ok", "mensagem": f"Região '{nome_regiao}' salva com sucesso."})
+    try:
+        lat = float(lat)
+        lon = float(lon)
+        salvar_regiao(nome_regiao, lat, lon, 40)  # Raio ajustado para 40 metros
+        return jsonify({"status": "ok", "mensagem": f"Região '{nome_regiao}' salva com sucesso."})
+    except Exception as e:
+        return jsonify({"erro": "Falha ao salvar região", "detalhes": str(e)}), 500
 
 # ==============================
 # Listar todas as regiões
