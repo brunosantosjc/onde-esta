@@ -312,7 +312,7 @@ def detalhes(nome):
     local = ", ".join(regioes_atuais) if regioes_atuais else pos.get("rua_cache") or "essa região"
 
     if estado == "parado":
-        texto = f"Essa pessoa está parada em {local} há {tempo}, bateria {pos['batt']}%."
+        texto = f"Essa pessoa está parada nesse local há {tempo}, bateria {pos['batt']}%."
     else:
         vel_kmh = round(pos["vel"] * 3.6)
         direcao = grau_para_direcao(pos["cog"])
