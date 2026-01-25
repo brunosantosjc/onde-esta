@@ -171,72 +171,61 @@ def grau_para_direcao(cog):
     return direcoes[idx]
 
 # ==============================
-# Webhook OwnTracks
+# Webhook Traccar Client
 # ==============================
 @app.route("/", methods=["POST"])
-def owntracks_webhook():
+def traccar_webhook():
     data = request.json or {}
-    if data.get("_type") != "location":
-        return jsonify({"status": "ok"})
+
+    if "latitude" not in data or "longitude" not in data:
+        return jsonify({"status": "ignored"})
 
     agora = int(time.time())
     CACHE_RUA_MAX = 15 * 60
 
-    topic = data.get("topic", "")
-    partes = topic.split("/")
-    if len(partes) < 3:
-        return jsonify({"erro": "Topic inválido"}), 400
+    # 🔹 IDENTIDADE VEM DO device_id DO TRACCAR
+    nome = str(data.get("device_id", "desconhecido")).lower()
 
-    nome = partes[2].lower()
-    lat = data.get("lat")
-    lon = data.get("lon")
-    vel_ot_ms = data.get("vel", 0) or 0
-    cog = data.get("cog", 0)
-    batt = data.get("batt")
-    timestamp = data.get("tst", agora)
+    lat = data.get("latitude")
+    lon = data.get("longitude")
+
+    # speed vem em km/h → converter para m/s
+    vel_kmh = data.get("speed", 0) or 0
+    vel_ms = vel_kmh / 3.6
+
+    cog = data.get("course", 0)
+    batt = data.get("batteryLevel")
+
+    fix_time = data.get("fixTime")
+    if fix_time:
+        try:
+            timestamp = int(time.mktime(time.strptime(fix_time[:19], "%Y-%m-%dT%H:%M:%S")))
+        except:
+            timestamp = agora
+    else:
+        timestamp = agora
 
     anterior = buscar_posicao(nome)
     rua_cache = anterior.get("rua_cache") if anterior else None
     rua_cache_ts = anterior.get("rua_cache_ts") if anterior else None
     estado_anterior = anterior.get("estado_movimento") if anterior else "parado"
 
-    vel_final_ms = vel_ot_ms
+    vel_final_ms = vel_ms
     estado_movimento = estado_anterior
 
     if anterior:
         dt = timestamp - anterior["timestamp"]
         if dt > 0:
             dist = distancia_metros(anterior["lat"], anterior["lon"], lat, lon)
-            vel_calc_ms = dist / dt if dt >= 5 else 0
-            vel_calc_kmh = vel_calc_ms * 3.6
-            vel_ot_kmh = vel_ot_ms * 3.6
-
-            if 5 < vel_ot_kmh < 160:
-                vel_final_ms = vel_ot_ms
-            elif vel_calc_kmh < 160:
-                vel_final_ms = vel_calc_ms
-            else:
-                vel_final_ms = 0
 
             if estado_anterior == "parado":
-                if dist >= 50 and dt >= 10:
+                if dist >= 50 or vel_kmh >= 8:
                     estado_movimento = "movimento"
-                elif vel_ot_kmh >= 8:
-                    estado_movimento = "movimento"
-                else:
+            else:
+                if dist < 20 and dt >= 90 or vel_kmh <= 3:
                     estado_movimento = "parado"
-            elif estado_anterior == "movimento":
-                if dist < 20 and dt >= 90:
-                    estado_movimento = "parado"
-                elif vel_ot_kmh <= 3:
-                    estado_movimento = "parado"
-                else:
-                    estado_movimento = "movimento"
 
-            precisa_atualizar_rua = False
             if dist > 50 or not rua_cache_ts or (agora - rua_cache_ts) > CACHE_RUA_MAX:
-                precisa_atualizar_rua = True
-            if precisa_atualizar_rua:
                 novo_local = latlon_para_rua(lat, lon)
                 if novo_local:
                     rua_cache = novo_local
@@ -258,25 +247,17 @@ def owntracks_webhook():
         "estado_movimento": estado_movimento
     })
 
-    config = {
-        "_type": "configuration",
-        "mode": 3,
-        "interval": 60 if estado_movimento == "movimento" else 300,
-        "accuracy": 50 if estado_movimento == "movimento" else 100,
-        "keepalive": 30 if estado_movimento == "movimento" else 60
-    }
-
-    return jsonify(config)
+    return jsonify({"status": "ok"})
 
 # ==============================
 # Health
 # ==============================
 @app.route("/", methods=["GET"])
 def health():
-    return "OwnTracks endpoint ativo", 200
+    return "Traccar endpoint ativo", 200
 
 # ==============================
-# /where/<nome> - ajustado para usar região salva
+# /where/<nome>
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -289,15 +270,14 @@ def onde_esta(nome):
     regioes_atuais = verificar_regioes(lat, lon)
     local = regioes_atuais[0] if regioes_atuais else pos.get("rua_cache") or "essa região"
 
-    estado = pos.get("estado_movimento")
-    if estado == "parado":
+    if pos["estado_movimento"] == "parado":
         texto = f"{nome.capitalize()} está parado próximo de {local}."
     else:
         texto = f"{nome.capitalize()} está passando próximo de {local}."
     return jsonify({"resposta": texto})
 
 # ==============================
-# /details/<nome> - interativo para salvar região (apenas se parado)
+# /details/<nome>
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
@@ -306,15 +286,14 @@ def detalhes(nome):
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
     tempo = formatar_tempo(int(time.time()) - pos["timestamp"])
-    estado = pos.get("estado_movimento")
     lat = pos["lat"]
     lon = pos["lon"]
 
     regioes_atuais = verificar_regioes(lat, lon)
-    precisa_salvar = len(regioes_atuais) == 0 and estado == "parado"
+    precisa_salvar = len(regioes_atuais) == 0 and pos["estado_movimento"] == "parado"
     local = ", ".join(regioes_atuais) if regioes_atuais else pos.get("rua_cache") or "essa região"
 
-    if estado == "parado":
+    if pos["estado_movimento"] == "parado":
         texto = f"Essa pessoa está parada nesse local há {tempo}, bateria {pos['batt']}%."
     else:
         vel_kmh = round(pos["vel"] * 3.6)
@@ -329,7 +308,7 @@ def detalhes(nome):
     })
 
 # ==============================
-# Endpoint para salvar região manualmente
+# Salvar região manual
 # ==============================
 @app.route("/salvar_regiao_manual", methods=["POST"])
 def salvar_regiao_manual():
@@ -342,30 +321,21 @@ def salvar_regiao_manual():
         return jsonify({"erro": "Dados insuficientes"}), 400
 
     try:
-        lat = float(lat)
-        lon = float(lon)
-        salvar_regiao(nome_regiao, lat, lon, 40)  # Raio ajustado para 40 metros
-        return jsonify({"status": "ok", "mensagem": f"Região '{nome_regiao}' salva com sucesso."})
+        salvar_regiao(nome_regiao, float(lat), float(lon), 40)
+        return jsonify({"status": "ok"})
     except Exception as e:
-        return jsonify({"erro": "Falha ao salvar região", "detalhes": str(e)}), 500
+        return jsonify({"erro": str(e)}), 500
 
 # ==============================
-# Listar todas as regiões
+# Listar regiões
 # ==============================
 @app.route("/regioes", methods=["GET"])
 def listar_regioes():
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute("SELECT * FROM regioes")
-            regioes = cur.fetchall()
-        return jsonify({
-            "total": len(regioes),
-            "regioes": [dict(r) for r in regioes]
-        })
-    except Exception as e:
-        print("Erro ao listar regiões:", e)
-        return jsonify({"erro": "Falha ao buscar regiões", "detalhes": str(e)}), 500
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM regioes")
+        regioes = cur.fetchall()
+    return jsonify({"total": len(regioes), "regioes": [dict(r) for r in regioes]})
 
 # ==============================
 # Init
