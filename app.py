@@ -182,7 +182,11 @@ def grau_para_direcao(cog):
 # ==============================
 @app.route("/", methods=["POST"])
 def traccar_webhook():
-    data = request.json or {}
+    print("HEADERS:", dict(request.headers))
+    print("RAW:", request.data)
+    print("JSON:", request.get_json(silent=True))
+
+    data = request.get_json(silent=True) or {}
 
     if "latitude" not in data or "longitude" not in data:
         return jsonify({"status": "ignored"})
@@ -190,18 +194,20 @@ def traccar_webhook():
     agora = int(time.time())
     CACHE_RUA_MAX = 15 * 60
 
-    nome = str(data.get("device_id", "desconhecido")).lower()
+    nome = str(data.get("deviceId", "desconhecido")).lower()
     lat = data["latitude"]
     lon = data["longitude"]
 
     vel_kmh = data.get("speed", 0) or 0
     vel_ms = vel_kmh / 3.6
     cog = data.get("course", 0)
-    batt = data.get("batteryLevel")
 
-    fix_time = data.get("fixTime")
+    attributes = data.get("attributes", {})
+    batt = attributes.get("batteryLevel")
+
+    device_time = data.get("deviceTime")
     try:
-        timestamp = int(time.mktime(time.strptime(fix_time[:19], "%Y-%m-%dT%H:%M:%S"))) if fix_time else agora
+        timestamp = int(time.mktime(time.strptime(device_time[:19], "%Y-%m-%dT%H:%M:%S"))) if device_time else agora
     except:
         timestamp = agora
 
@@ -215,6 +221,7 @@ def traccar_webhook():
         dt = timestamp - anterior["timestamp"]
         if dt > 0:
             dist = distancia_metros(anterior["lat"], anterior["lon"], lat, lon)
+
             if estado_anterior == "parado" and (dist >= 50 or vel_kmh >= 8):
                 estado_movimento = "movimento"
             elif estado_anterior == "movimento" and (dist < 20 and dt >= 90 or vel_kmh <= 3):
