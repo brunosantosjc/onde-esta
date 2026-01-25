@@ -147,18 +147,17 @@ def formatar_tempo(segundos):
 def latlon_para_rua(lat, lon):
     try:
         url = "https://nominatim.openstreetmap.org/reverse"
-        params = {"lat": lat, "lon": lon, "format": "json", "zoom": 18}
+        params = {"lat": lat, "lon": lon, "format": "json", "addressdetails": 1, "zoom": 18}
         headers = {"User-Agent": "OndeEsta/1.0"}
         r = requests.get(url, params=params, headers=headers, timeout=10)
         r.raise_for_status()
         data = r.json()
         address = data.get("address", {})
-        partes = [
-            address.get("road"),
-            address.get("suburb") or address.get("neighbourhood"),
-            address.get("city") or address.get("town")
-        ]
-        return ", ".join([p for p in partes if p])
+        rua = address.get("road")
+        bairro = address.get("suburb") or address.get("neighbourhood")
+        cidade = address.get("city") or address.get("town")
+        partes = [p for p in [rua, bairro, cidade] if p]
+        return ", ".join(partes) if partes else None
     except:
         return None
 
@@ -172,39 +171,85 @@ def grau_para_direcao(cog):
     return direcoes[idx]
 
 # ==============================
-# WEBHOOK GPS LOGGER
+# Webhook OwnTracks
 # ==============================
 @app.route("/", methods=["POST"])
-def gpslogger_webhook():
-    data = request.get_json(silent=True) or {}
+def owntracks_webhook():
+    data = request.json or {}
+    if data.get("_type") != "location":
+        return jsonify({"status": "ok"})
 
-    nome = (data.get("device") or "desconhecido").lower()
-    lat = data.get("latitude")
-    lon = data.get("longitude")
+    agora = int(time.time())
+    CACHE_RUA_MAX = 15 * 60
 
-    if lat is None or lon is None:
-        return jsonify({"erro": "Latitude ou longitude ausente"}), 400
+    topic = data.get("topic", "")
+    partes = topic.split("/")
+    if len(partes) < 3:
+        return jsonify({"erro": "Topic inválido"}), 400
 
-    batt = data.get("battery")
-    vel = (data.get("speed") or 0)  # m/s
-    cog = data.get("bearing") or 0
-    timestamp = int(time.time())
+    nome = partes[2].lower()
+    lat = data.get("lat")
+    lon = data.get("lon")
+    vel_ot_ms = data.get("vel", 0) or 0
+    cog = data.get("cog", 0)
+    batt = data.get("batt")
+    timestamp = data.get("tst", agora)
 
     anterior = buscar_posicao(nome)
-
-    estado_movimento = "movimento" if vel >= 1 else "parado"
-
     rua_cache = anterior.get("rua_cache") if anterior else None
     rua_cache_ts = anterior.get("rua_cache_ts") if anterior else None
+    estado_anterior = anterior.get("estado_movimento") if anterior else "parado"
 
-    if not rua_cache or (rua_cache_ts and time.time() - rua_cache_ts > 900):
+    vel_final_ms = vel_ot_ms
+    estado_movimento = estado_anterior
+
+    if anterior:
+        dt = timestamp - anterior["timestamp"]
+        if dt > 0:
+            dist = distancia_metros(anterior["lat"], anterior["lon"], lat, lon)
+            vel_calc_ms = dist / dt if dt >= 5 else 0
+            vel_calc_kmh = vel_calc_ms * 3.6
+            vel_ot_kmh = vel_ot_ms * 3.6
+
+            if 5 < vel_ot_kmh < 160:
+                vel_final_ms = vel_ot_ms
+            elif vel_calc_kmh < 160:
+                vel_final_ms = vel_calc_ms
+            else:
+                vel_final_ms = 0
+
+            if estado_anterior == "parado":
+                if dist >= 50 and dt >= 10:
+                    estado_movimento = "movimento"
+                elif vel_ot_kmh >= 8:
+                    estado_movimento = "movimento"
+                else:
+                    estado_movimento = "parado"
+            elif estado_anterior == "movimento":
+                if dist < 20 and dt >= 90:
+                    estado_movimento = "parado"
+                elif vel_ot_kmh <= 3:
+                    estado_movimento = "parado"
+                else:
+                    estado_movimento = "movimento"
+
+            precisa_atualizar_rua = False
+            if dist > 50 or not rua_cache_ts or (agora - rua_cache_ts) > CACHE_RUA_MAX:
+                precisa_atualizar_rua = True
+            if precisa_atualizar_rua:
+                novo_local = latlon_para_rua(lat, lon)
+                if novo_local:
+                    rua_cache = novo_local
+                    rua_cache_ts = agora
+
+    if not rua_cache:
         rua_cache = latlon_para_rua(lat, lon)
-        rua_cache_ts = int(time.time())
+        rua_cache_ts = agora
 
     salvar_posicao(nome, {
         "lat": lat,
         "lon": lon,
-        "vel": vel,
+        "vel": vel_final_ms,
         "cog": cog,
         "batt": batt,
         "timestamp": timestamp,
@@ -213,17 +258,25 @@ def gpslogger_webhook():
         "estado_movimento": estado_movimento
     })
 
-    return jsonify({"status": "ok"})
+    config = {
+        "_type": "configuration",
+        "mode": 3,
+        "interval": 60 if estado_movimento == "movimento" else 300,
+        "accuracy": 50 if estado_movimento == "movimento" else 100,
+        "keepalive": 30 if estado_movimento == "movimento" else 60
+    }
+
+    return jsonify(config)
 
 # ==============================
-# HEALTH
+# Health
 # ==============================
 @app.route("/", methods=["GET"])
 def health():
-    return "GPS Logger endpoint ativo", 200
+    return "OwnTracks endpoint ativo", 200
 
 # ==============================
-# WHERE
+# /where/<nome> - ajustado para usar região salva
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -231,18 +284,20 @@ def onde_esta(nome):
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    regioes = verificar_regioes(pos["lat"], pos["lon"])
-    local = regioes[0] if regioes else pos.get("rua_cache") or "essa região"
+    lat = pos["lat"]
+    lon = pos["lon"]
+    regioes_atuais = verificar_regioes(lat, lon)
+    local = regioes_atuais[0] if regioes_atuais else pos.get("rua_cache") or "essa região"
 
-    if pos["estado_movimento"] == "parado":
+    estado = pos.get("estado_movimento")
+    if estado == "parado":
         texto = f"{nome.capitalize()} está parado próximo de {local}."
     else:
-        texto = f"{nome.capitalize()} está em movimento próximo de {local}."
-
+        texto = f"{nome.capitalize()} está passando próximo de {local}."
     return jsonify({"resposta": texto})
 
 # ==============================
-# DETAILS
+# /details/<nome> - interativo para salvar região (apenas se parado)
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
@@ -251,18 +306,69 @@ def detalhes(nome):
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
     tempo = formatar_tempo(int(time.time()) - pos["timestamp"])
+    estado = pos.get("estado_movimento")
+    lat = pos["lat"]
+    lon = pos["lon"]
 
-    if pos["estado_movimento"] == "parado":
-        texto = f"Está parado há {tempo}, bateria {pos['batt']}%."
+    regioes_atuais = verificar_regioes(lat, lon)
+    precisa_salvar = len(regioes_atuais) == 0 and estado == "parado"
+    local = ", ".join(regioes_atuais) if regioes_atuais else pos.get("rua_cache") or "essa região"
+
+    if estado == "parado":
+        texto = f"Essa pessoa está parada nesse local há {tempo}, bateria {pos['batt']}%."
     else:
         vel_kmh = round(pos["vel"] * 3.6)
         direcao = grau_para_direcao(pos["cog"])
-        texto = f"Em movimento a {vel_kmh} km/h, indo para {direcao}. Última atualização há {tempo}, bateria {pos['batt']}%."
+        texto = f"Essa pessoa está em movimento a {vel_kmh} km/h, indo para {direcao}, por {local}. Última atualização há {tempo}, bateria {pos['batt']}%."
 
-    return jsonify({"detalhes": texto})
+    return jsonify({
+        "detalhes": texto,
+        "precisa_salvar_regiao": precisa_salvar,
+        "lat": lat,
+        "lon": lon
+    })
 
 # ==============================
-# INIT
+# Endpoint para salvar região manualmente
+# ==============================
+@app.route("/salvar_regiao_manual", methods=["POST"])
+def salvar_regiao_manual():
+    data = request.json or {}
+    nome_regiao = data.get("nome")
+    lat = data.get("lat")
+    lon = data.get("lon")
+
+    if not nome_regiao or lat is None or lon is None:
+        return jsonify({"erro": "Dados insuficientes"}), 400
+
+    try:
+        lat = float(lat)
+        lon = float(lon)
+        salvar_regiao(nome_regiao, lat, lon, 40)  # Raio ajustado para 40 metros
+        return jsonify({"status": "ok", "mensagem": f"Região '{nome_regiao}' salva com sucesso."})
+    except Exception as e:
+        return jsonify({"erro": "Falha ao salvar região", "detalhes": str(e)}), 500
+
+# ==============================
+# Listar todas as regiões
+# ==============================
+@app.route("/regioes", methods=["GET"])
+def listar_regioes():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute("SELECT * FROM regioes")
+            regioes = cur.fetchall()
+        return jsonify({
+            "total": len(regioes),
+            "regioes": [dict(r) for r in regioes]
+        })
+    except Exception as e:
+        print("Erro ao listar regiões:", e)
+        return jsonify({"erro": "Falha ao buscar regiões", "detalhes": str(e)}), 500
+
+# ==============================
+# Init
 # ==============================
 init_db()
 
