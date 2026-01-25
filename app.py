@@ -108,11 +108,11 @@ def verificar_regioes(lat, lon):
         conn.row_factory = sqlite3.Row
         cur = conn.execute("SELECT * FROM regioes")
         regioes = cur.fetchall()
-    return [
-        r["nome"]
-        for r in regioes
-        if distancia_metros(lat, lon, r["lat"], r["lon"]) <= r["raio_metros"]
-    ]
+    resultado = []
+    for r in regioes:
+        if distancia_metros(lat, lon, r["lat"], r["lon"]) <= r["raio_metros"]:
+            resultado.append(r["nome"])
+    return resultado
 
 # ==============================
 # Utilidades
@@ -146,26 +146,19 @@ def formatar_tempo(segundos):
 # ==============================
 def latlon_para_rua(lat, lon):
     try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={
-                "lat": lat,
-                "lon": lon,
-                "format": "json",
-                "zoom": 18,
-                "addressdetails": 1
-            },
-            headers={"User-Agent": "OndeEsta/1.0"},
-            timeout=10
-        )
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {"lat": lat, "lon": lon, "format": "json", "zoom": 18}
+        headers = {"User-Agent": "OndeEsta/1.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
         r.raise_for_status()
-        addr = r.json().get("address", {})
+        data = r.json()
+        address = data.get("address", {})
         partes = [
-            addr.get("road"),
-            addr.get("suburb") or addr.get("neighbourhood"),
-            addr.get("city") or addr.get("town")
+            address.get("road"),
+            address.get("suburb") or address.get("neighbourhood"),
+            address.get("city") or address.get("town")
         ]
-        return ", ".join(p for p in partes if p) or None
+        return ", ".join([p for p in partes if p])
     except:
         return None
 
@@ -175,70 +168,43 @@ def latlon_para_rua(lat, lon):
 def grau_para_direcao(cog):
     direcoes = ["norte", "nordeste", "leste", "sudeste",
                 "sul", "sudoeste", "oeste", "noroeste"]
-    return direcoes[round(cog / 45) % 8]
+    idx = round(cog / 45) % 8
+    return direcoes[idx]
 
 # ==============================
-# Webhook Traccar Client
+# WEBHOOK GPS LOGGER
 # ==============================
 @app.route("/", methods=["POST"])
-def traccar_webhook():
-    print("HEADERS:", dict(request.headers))
-    print("RAW:", request.data)
-    print("JSON:", request.get_json(silent=True))
-
+def gpslogger_webhook():
     data = request.get_json(silent=True) or {}
 
-    if "latitude" not in data or "longitude" not in data:
-        return jsonify({"status": "ignored"})
+    nome = (data.get("device") or "desconhecido").lower()
+    lat = data.get("latitude")
+    lon = data.get("longitude")
 
-    agora = int(time.time())
-    CACHE_RUA_MAX = 15 * 60
+    if lat is None or lon is None:
+        return jsonify({"erro": "Latitude ou longitude ausente"}), 400
 
-    nome = str(data.get("deviceId", "desconhecido")).lower()
-    lat = data["latitude"]
-    lon = data["longitude"]
-
-    vel_kmh = data.get("speed", 0) or 0
-    vel_ms = vel_kmh / 3.6
-    cog = data.get("course", 0)
-
-    attributes = data.get("attributes", {})
-    batt = attributes.get("batteryLevel")
-
-    device_time = data.get("deviceTime")
-    try:
-        timestamp = int(time.mktime(time.strptime(device_time[:19], "%Y-%m-%dT%H:%M:%S"))) if device_time else agora
-    except:
-        timestamp = agora
+    batt = data.get("battery")
+    vel = (data.get("speed") or 0)  # m/s
+    cog = data.get("bearing") or 0
+    timestamp = int(time.time())
 
     anterior = buscar_posicao(nome)
+
+    estado_movimento = "movimento" if vel >= 1 else "parado"
+
     rua_cache = anterior.get("rua_cache") if anterior else None
     rua_cache_ts = anterior.get("rua_cache_ts") if anterior else None
-    estado_anterior = anterior.get("estado_movimento") if anterior else "parado"
-    estado_movimento = estado_anterior
 
-    if anterior:
-        dt = timestamp - anterior["timestamp"]
-        if dt > 0:
-            dist = distancia_metros(anterior["lat"], anterior["lon"], lat, lon)
-
-            if estado_anterior == "parado" and (dist >= 50 or vel_kmh >= 8):
-                estado_movimento = "movimento"
-            elif estado_anterior == "movimento" and (dist < 20 and dt >= 90 or vel_kmh <= 3):
-                estado_movimento = "parado"
-
-            if dist > 50 or not rua_cache_ts or (agora - rua_cache_ts) > CACHE_RUA_MAX:
-                rua_cache = latlon_para_rua(lat, lon) or rua_cache
-                rua_cache_ts = agora
-
-    if not rua_cache:
+    if not rua_cache or (rua_cache_ts and time.time() - rua_cache_ts > 900):
         rua_cache = latlon_para_rua(lat, lon)
-        rua_cache_ts = agora
+        rua_cache_ts = int(time.time())
 
     salvar_posicao(nome, {
         "lat": lat,
         "lon": lon,
-        "vel": vel_ms,
+        "vel": vel,
         "cog": cog,
         "batt": batt,
         "timestamp": timestamp,
@@ -250,14 +216,14 @@ def traccar_webhook():
     return jsonify({"status": "ok"})
 
 # ==============================
-# Health
+# HEALTH
 # ==============================
 @app.route("/", methods=["GET"])
 def health():
-    return "Traccar endpoint ativo", 200
+    return "GPS Logger endpoint ativo", 200
 
 # ==============================
-# /where/<nome>
+# WHERE
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -268,15 +234,15 @@ def onde_esta(nome):
     regioes = verificar_regioes(pos["lat"], pos["lon"])
     local = regioes[0] if regioes else pos.get("rua_cache") or "essa região"
 
-    texto = (
-        f"{nome.capitalize()} está parado próximo de {local}."
-        if pos["estado_movimento"] == "parado"
-        else f"{nome.capitalize()} está passando próximo de {local}."
-    )
+    if pos["estado_movimento"] == "parado":
+        texto = f"{nome.capitalize()} está parado próximo de {local}."
+    else:
+        texto = f"{nome.capitalize()} está em movimento próximo de {local}."
+
     return jsonify({"resposta": texto})
 
 # ==============================
-# /details/<nome>
+# DETAILS
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
@@ -285,45 +251,18 @@ def detalhes(nome):
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
     tempo = formatar_tempo(int(time.time()) - pos["timestamp"])
-    regioes = verificar_regioes(pos["lat"], pos["lon"])
-    precisa_salvar = not regioes and pos["estado_movimento"] == "parado"
-    local = ", ".join(regioes) if regioes else pos.get("rua_cache") or "essa região"
 
     if pos["estado_movimento"] == "parado":
-        texto = f"Essa pessoa está parada nesse local há {tempo}, bateria {pos['batt']}%."
+        texto = f"Está parado há {tempo}, bateria {pos['batt']}%."
     else:
-        texto = f"Essa pessoa está em movimento a {round(pos['vel']*3.6)} km/h, indo para {grau_para_direcao(pos['cog'])}, por {local}. Última atualização há {tempo}, bateria {pos['batt']}%."
+        vel_kmh = round(pos["vel"] * 3.6)
+        direcao = grau_para_direcao(pos["cog"])
+        texto = f"Em movimento a {vel_kmh} km/h, indo para {direcao}. Última atualização há {tempo}, bateria {pos['batt']}%."
 
-    return jsonify({
-        "detalhes": texto,
-        "precisa_salvar_regiao": precisa_salvar,
-        "lat": pos["lat"],
-        "lon": pos["lon"]
-    })
+    return jsonify({"detalhes": texto})
 
 # ==============================
-# Salvar região manual
-# ==============================
-@app.route("/salvar_regiao_manual", methods=["POST"])
-def salvar_regiao_manual():
-    data = request.json or {}
-    if not all(k in data for k in ("nome", "lat", "lon")):
-        return jsonify({"erro": "Dados insuficientes"}), 400
-    salvar_regiao(data["nome"], float(data["lat"]), float(data["lon"]))
-    return jsonify({"status": "ok"})
-
-# ==============================
-# Listar regiões
-# ==============================
-@app.route("/regioes", methods=["GET"])
-def listar_regioes():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM regioes")
-        return jsonify({"total": len(cur.fetchall()), "regioes": [dict(r) for r in cur]})
-
-# ==============================
-# Init
+# INIT
 # ==============================
 init_db()
 
