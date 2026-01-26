@@ -321,8 +321,8 @@ def determinar_local_prioritario(lat, lon):
     """
     Retorna o local seguindo a ordem de prioridade:
     1. Região salva no banco (raio específico)
-    2. POI a 100m (Overpass API)
-    3. POI a 500m (Overpass API)
+    2. POI a 500m (Overpass API)
+    3. POI a 1000m (Overpass API)
     4. Rua + Bairro + Cidade (Nominatim)
     """
     # 1. Verificar regiões salvas
@@ -330,15 +330,15 @@ def determinar_local_prioritario(lat, lon):
     if regioes_salvas:
         return regioes_salvas[0]
     
-    # 2. POI a 100m usando Overpass
-    poi_100 = buscar_poi_em_raio(lat, lon, 100)
-    if poi_100:
-        return poi_100
-    
-    # 3. POI a 500m usando Overpass
+    # 2. POI a 500m usando Overpass
     poi_500 = buscar_poi_em_raio(lat, lon, 500)
     if poi_500:
         return poi_500
+    
+    # 3. POI a 1000m usando Overpass
+    poi_1000 = buscar_poi_em_raio(lat, lon, 1000)
+    if poi_1000:
+        return poi_1000
     
     # 4. Fallback: rua + bairro + cidade usando Nominatim
     return latlon_para_rua(lat, lon) or "essa região"
