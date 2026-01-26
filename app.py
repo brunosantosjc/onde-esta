@@ -41,19 +41,10 @@ def init_db():
                         estado_movimento TEXT
                     );
                 """)
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS regioes (
-                        id SERIAL PRIMARY KEY,
-                        nome TEXT UNIQUE,
-                        lat DOUBLE PRECISION,
-                        lon DOUBLE PRECISION,
-                        raio_metros DOUBLE PRECISION
-                    );
-                """)
             conn.commit()
-        app.logger.info("Banco inicializado com sucesso")
+        app.logger.info("Banco inicializado")
     except Exception as e:
-        app.logger.error("Erro ao inicializar banco: %s", e)
+        app.logger.error("Erro no banco: %s", e)
 
 # ==============================
 # Utilidades
@@ -95,53 +86,7 @@ def latlon_para_rua(lat, lon):
             timeout=10
         )
         return r.json().get("display_name")
-    except Exception as e:
-        app.logger.warning("Erro no reverse geocode: %s", e)
-        return None
-
-# ==============================
-# POI à frente
-# ==============================
-def buscar_poi_a_frente(lat, lon, cog, raio=500):
-    query = f"""
-    [out:json];
-    (
-      node(around:{raio},{lat},{lon})["railway"="station"];
-      node(around:{raio},{lat},{lon})["amenity"="bus_station"];
-      node(around:{raio},{lat},{lon})["amenity"="shopping_mall"];
-      node(around:{raio},{lat},{lon})["leisure"="park"];
-    );
-    out;
-    """
-    try:
-        r = requests.post(
-            "https://overpass-api.de/api/interpreter",
-            data=query,
-            headers={"User-Agent": "OndeEsta/1.0"},
-            timeout=15
-        )
-        data = r.json()
-
-        melhor = None
-        menor = 1e9
-
-        for el in data.get("elements", []):
-            latp = el.get("lat")
-            lonp = el.get("lon")
-            nome = el.get("tags", {}).get("name")
-            if not latp or not lonp or not nome:
-                continue
-
-            bearing = calcular_bearing(lat, lon, latp, lonp)
-            if angulo_diferenca(cog, bearing) <= 45:
-                dist = distancia_metros(lat, lon, latp, lonp)
-                if dist < menor:
-                    menor = dist
-                    melhor = nome
-
-        return melhor
-    except Exception as e:
-        app.logger.warning("Erro ao buscar POI: %s", e)
+    except:
         return None
 
 # ==============================
@@ -176,128 +121,60 @@ def salvar_posicao(nome, data):
                     poi_cache_ts=EXCLUDED.poi_cache_ts,
                     poi_cache_cog=EXCLUDED.poi_cache_cog,
                     estado_movimento=EXCLUDED.estado_movimento
-            """, {**data, "nome": nome.lower()})
+            """, data)
         conn.commit()
 
 def buscar_posicao(nome):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT * FROM ultima_posicao WHERE nome=%s", (nome.lower(),))
+            cur.execute("SELECT * FROM ultima_posicao WHERE nome=%s", (nome,))
             r = cur.fetchone()
             return dict(r) if r else None
 
 # ==============================
-# UPDATE
+# UPDATE (CORRIGIDO)
 # ==============================
 @app.route("/update", methods=["POST"])
 def update():
-    data = request.get_json(silent=True) or {}
+    data = request.get_json(silent=True)
 
-    # Defaults seguros
-    data.setdefault("vel", 0)
-    data.setdefault("cog", 0)
-    data.setdefault("batt", 0)
+    if not data:
+        return jsonify({"erro": "JSON inválido"}), 400
 
     if "nome" not in data:
-        return jsonify({"erro": "Campo 'nome' obrigatório"}), 400
+        return jsonify({"erro": "Campo obrigatório: nome (device_id)"}), 400
 
     if "lat" not in data or "lon" not in data:
         return jsonify({"erro": "lat e lon são obrigatórios"}), 400
 
-    app.logger.info("UPDATE recebido: %s", data)
+    nome = data["nome"].lower()
 
-    try:
-        agora = int(time.time())
-        data["timestamp"] = agora
+    data.setdefault("vel", 0)
+    data.setdefault("cog", 0)
+    data.setdefault("batt", 0)
 
-        pos_ant = buscar_posicao(data["nome"])
-        data["estado_movimento"] = "andando" if data["vel"] > 0.5 else "parado"
+    agora = int(time.time())
+    data["timestamp"] = agora
+    data["estado_movimento"] = "andando" if data["vel"] > 0.5 else "parado"
 
-        if not pos_ant or agora - (pos_ant.get("rua_cache_ts") or 0) > 600:
-            data["rua_cache"] = latlon_para_rua(data["lat"], data["lon"])
-            data["rua_cache_ts"] = agora
-        else:
-            data["rua_cache"] = pos_ant["rua_cache"]
-            data["rua_cache_ts"] = pos_ant["rua_cache_ts"]
+    pos_ant = buscar_posicao(nome)
 
-        if data["estado_movimento"] == "andando":
-            data["poi_cache"] = buscar_poi_a_frente(data["lat"], data["lon"], data["cog"])
-            data["poi_cache_ts"] = agora
-            data["poi_cache_cog"] = data["cog"]
-        else:
-            data["poi_cache"] = pos_ant.get("poi_cache") if pos_ant else None
-            data["poi_cache_ts"] = pos_ant.get("poi_cache_ts") if pos_ant else None
-            data["poi_cache_cog"] = pos_ant.get("poi_cache_cog") if pos_ant else None
+    if not pos_ant or agora - (pos_ant.get("rua_cache_ts") or 0) > 600:
+        data["rua_cache"] = latlon_para_rua(data["lat"], data["lon"])
+        data["rua_cache_ts"] = agora
+    else:
+        data["rua_cache"] = pos_ant["rua_cache"]
+        data["rua_cache_ts"] = pos_ant["rua_cache_ts"]
 
-        salvar_posicao(data["nome"], data)
-        return jsonify({"status": "ok"})
+    data["poi_cache"] = None
+    data["poi_cache_ts"] = None
+    data["poi_cache_cog"] = None
 
-    except Exception as e:
-        app.logger.exception("Erro no /update")
-        return jsonify({"erro": "Erro interno"}), 500
+    data["nome"] = nome
 
-# ==============================
-# WHERE
-# ==============================
-@app.route("/where/<nome>")
-def onde_esta(nome):
-    try:
-        pos = buscar_posicao(nome)
-        if not pos:
-            return jsonify({"erro": "Pessoa não encontrada"}), 404
+    salvar_posicao(nome, data)
 
-        verbo = "está parado" if pos["estado_movimento"] == "parado" else "está passando"
-        local = pos["rua_cache"] or "esse local"
-
-        return jsonify({
-            "resposta": f"{nome.capitalize()} {verbo} próximo a {local}. Você quer mais detalhes?"
-        })
-    except Exception:
-        app.logger.exception("Erro no /where")
-        return jsonify({"erro": "Erro interno"}), 500
-
-# ==============================
-# DETAILS
-# ==============================
-@app.route("/details/<nome>")
-def detalhes(nome):
-    try:
-        pos = buscar_posicao(nome)
-        if not pos:
-            return jsonify({"erro": "Pessoa não encontrada"}), 404
-
-        if pos["estado_movimento"] == "parado":
-            texto = f"Essa pessoa está parada nesse local, bateria {pos['batt']}%."
-        else:
-            direcao = f" em direção à {pos['poi_cache']}" if pos.get("poi_cache") else ""
-            texto = f"Essa pessoa está passando por esse local{direcao}, bateria {pos['batt']}%."
-
-        return jsonify({"detalhes": texto})
-    except Exception:
-        app.logger.exception("Erro no /details")
-        return jsonify({"erro": "Erro interno"}), 500
-
-# ==============================
-# DEBUG
-# ==============================
-@app.route("/debug")
-def debug():
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT * FROM ultima_posicao")
-            rows = cur.fetchall()
-            return jsonify({"total": len(rows), "dados": [dict(r) for r in rows]})
-
-# ==============================
-# HEALTH
-# ==============================
-@app.route("/health")
-def health():
-    try:
-        with get_conn():
-            return jsonify({"status": "ok"})
-    except:
-        return jsonify({"status": "db_error"}), 500
+    return jsonify({"status": "ok"})
 
 # ==============================
 # INIT
