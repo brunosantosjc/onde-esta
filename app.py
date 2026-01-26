@@ -257,7 +257,11 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
         data = response.json()
         
         if data.get("elements"):
-            elemento = data["elements"][0]
+            # Priorizar POIs que têm nome
+            elementos_com_nome = [e for e in data["elements"] if e.get("tags", {}).get("name")]
+            elementos = elementos_com_nome if elementos_com_nome else data["elements"]
+            
+            elemento = elementos[0]
             tags = elemento.get("tags", {})
             nome = tags.get("name", "")
             
