@@ -140,14 +140,60 @@ def formatar_tempo(segundos):
         texto += f" e {resto} minuto{'s' if resto != 1 else ''}"
     return texto
 
+def calcular_bearing(lat1, lon1, lat2, lon2):
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dlambda = math.radians(lon2 - lon1)
+    y = math.sin(dlambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+def angulo_diferenca(a, b):
+    diff = abs(a - b) % 360
+    return min(diff, 360 - diff)
+
 # ==============================
-# Direção
+# POI à frente (Overpass)
 # ==============================
-def grau_para_direcao(cog):
-    direcoes = ["norte", "nordeste", "leste", "sudeste",
-                "sul", "sudoeste", "oeste", "noroeste"]
-    idx = round(cog / 45) % 8
-    return direcoes[idx]
+def buscar_poi_a_frente(lat, lon, cog, raio=500):
+    query = f"""
+    [out:json];
+    (
+      node(around:{raio},{lat},{lon})["railway"="station"];
+      node(around:{raio},{lat},{lon})["amenity"="bus_station"];
+      node(around:{raio},{lat},{lon})["amenity"="shopping_mall"];
+      node(around:{raio},{lat},{lon})["leisure"="park"];
+    );
+    out center;
+    """
+    try:
+        r = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data=query,
+            timeout=15,
+            headers={"User-Agent": "OndeEsta/1.0"}
+        )
+        data = r.json()
+        melhor = None
+        menor_dist = 999999
+
+        for el in data.get("elements", []):
+            plat = el.get("lat")
+            plon = el.get("lon")
+            nome = el.get("tags", {}).get("name")
+            if not plat or not plon or not nome:
+                continue
+
+            bearing_poi = calcular_bearing(lat, lon, plat, plon)
+            if angulo_diferenca(cog, bearing_poi) <= 45:
+                dist = distancia_metros(lat, lon, plat, plon)
+                if dist < menor_dist:
+                    menor_dist = dist
+                    melhor = nome
+
+        return melhor
+    except:
+        return None
 
 # ==============================
 # /where
@@ -201,9 +247,12 @@ def detalhes(nome):
         quando = "agora" if delta < 120 else f"há {tempo}"
         verbo = "está passando" if delta < 120 else "passou próximo"
 
+        poi = buscar_poi_a_frente(lat, lon, pos["cog"])
+        direcao_poi = f" em direção à {poi}" if poi else ""
+
         texto = (
-            f"Essa pessoa {verbo} {ritmo} por esse local {quando}, "
-            f"bateria {pos['batt']}%."
+            f"Essa pessoa {verbo} {ritmo} por esse local {quando}"
+            f"{direcao_poi}, bateria {pos['batt']}%."
         )
         precisa_salvar = False
 
