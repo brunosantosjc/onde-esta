@@ -9,20 +9,6 @@ app = Flask(__name__)
 DB_PATH = "localizacoes.db"
 
 # ==============================
-# DEBUG
-# ==============================
-@app.route("/debug", methods=["GET"])
-def debug():
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM ultima_posicao")
-        rows = cur.fetchall()
-    return jsonify({
-        "total_registros": len(rows),
-        "dados": [dict(r) for r in rows]
-    })
-
-# ==============================
 # Banco de Dados
 # ==============================
 def init_db():
@@ -38,6 +24,9 @@ def init_db():
                 timestamp INTEGER,
                 rua_cache TEXT,
                 rua_cache_ts INTEGER,
+                poi_cache TEXT,
+                poi_cache_ts INTEGER,
+                poi_cache_cog REAL,
                 estado_movimento TEXT
             )
         """)
@@ -45,73 +34,12 @@ def init_db():
             CREATE TABLE IF NOT EXISTS regioes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nome TEXT UNIQUE,
-                lat REAL NOT NULL,
-                lon REAL NOT NULL,
-                raio_metros REAL NOT NULL
+                lat REAL,
+                lon REAL,
+                raio_metros REAL
             )
         """)
         conn.commit()
-
-def salvar_posicao(nome, data):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            INSERT INTO ultima_posicao (
-                nome, lat, lon, vel, cog, batt,
-                timestamp, rua_cache, rua_cache_ts, estado_movimento
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(nome) DO UPDATE SET
-                lat=excluded.lat,
-                lon=excluded.lon,
-                vel=excluded.vel,
-                cog=excluded.cog,
-                batt=excluded.batt,
-                timestamp=excluded.timestamp,
-                rua_cache=excluded.rua_cache,
-                rua_cache_ts=excluded.rua_cache_ts,
-                estado_movimento=excluded.estado_movimento
-        """, (
-            nome.lower(),
-            data["lat"],
-            data["lon"],
-            data.get("vel", 0),
-            data.get("cog", 0),
-            data.get("batt", 0),
-            data["timestamp"],
-            data.get("rua_cache"),
-            data.get("rua_cache_ts"),
-            data.get("estado_movimento")
-        ))
-        conn.commit()
-
-def buscar_posicao(nome):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM ultima_posicao WHERE nome = ?", (nome.lower(),))
-        row = cur.fetchone()
-        return dict(row) if row else None
-
-def salvar_regiao(nome, lat, lon, raio_metros=40):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("""
-            INSERT INTO regioes (nome, lat, lon, raio_metros)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(nome) DO UPDATE SET
-                lat=excluded.lat,
-                lon=excluded.lon,
-                raio_metros=excluded.raio_metros
-        """, (nome, lat, lon, raio_metros))
-        conn.commit()
-
-def verificar_regioes(lat, lon):
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM regioes")
-        regioes = cur.fetchall()
-    for r in regioes:
-        if distancia_metros(lat, lon, r["lat"], r["lon"]) <= r["raio_metros"]:
-            return r["nome"]
-    return None
 
 # ==============================
 # Utilidades
@@ -129,17 +57,6 @@ def distancia_metros(lat1, lon1, lat2, lon2):
     )
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
-def formatar_tempo(segundos):
-    minutos = max(1, int(segundos / 60))
-    if minutos < 60:
-        return f"{minutos} minuto{'s' if minutos != 1 else ''}"
-    horas = minutos // 60
-    resto = minutos % 60
-    texto = f"{horas} hora{'s' if horas != 1 else ''}"
-    if resto:
-        texto += f" e {resto} minuto{'s' if resto != 1 else ''}"
-    return texto
-
 def calcular_bearing(lat1, lon1, lat2, lon2):
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
@@ -153,6 +70,27 @@ def angulo_diferenca(a, b):
     return min(diff, 360 - diff)
 
 # ==============================
+# Reverse Geocoding (Rua)
+# ==============================
+def latlon_para_rua(lat, lon):
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={
+                "lat": lat,
+                "lon": lon,
+                "format": "jsonv2",
+                "zoom": 18
+            },
+            headers={"User-Agent": "OndeEsta/1.0"},
+            timeout=10
+        )
+        data = r.json()
+        return data.get("display_name")
+    except:
+        return None
+
+# ==============================
 # POI à frente (Overpass)
 # ==============================
 def buscar_poi_a_frente(lat, lon, cog, raio=500):
@@ -164,7 +102,7 @@ def buscar_poi_a_frente(lat, lon, cog, raio=500):
       node(around:{raio},{lat},{lon})["amenity"="shopping_mall"];
       node(around:{raio},{lat},{lon})["leisure"="park"];
     );
-    out center;
+    out;
     """
     try:
         r = requests.post(
@@ -174,6 +112,7 @@ def buscar_poi_a_frente(lat, lon, cog, raio=500):
             headers={"User-Agent": "OndeEsta/1.0"}
         )
         data = r.json()
+
         melhor = None
         menor_dist = 999999
 
@@ -184,8 +123,8 @@ def buscar_poi_a_frente(lat, lon, cog, raio=500):
             if not plat or not plon or not nome:
                 continue
 
-            bearing_poi = calcular_bearing(lat, lon, plat, plon)
-            if angulo_diferenca(cog, bearing_poi) <= 45:
+            bearing = calcular_bearing(lat, lon, plat, plon)
+            if angulo_diferenca(cog, bearing) <= 45:
                 dist = distancia_metros(lat, lon, plat, plon)
                 if dist < menor_dist:
                     menor_dist = dist
@@ -196,7 +135,64 @@ def buscar_poi_a_frente(lat, lon, cog, raio=500):
         return None
 
 # ==============================
-# UPDATE POSIÇÃO
+# Regiões
+# ==============================
+def verificar_regioes(lat, lon):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM regioes")
+        for r in cur.fetchall():
+            if distancia_metros(lat, lon, r["lat"], r["lon"]) <= r["raio_metros"]:
+                return r["nome"]
+    return None
+
+# ==============================
+# Persistência
+# ==============================
+def salvar_posicao(nome, data):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO ultima_posicao VALUES (
+                ?,?,?,?,?,?,?,?,?,?,?,?
+            )
+            ON CONFLICT(nome) DO UPDATE SET
+                lat=excluded.lat,
+                lon=excluded.lon,
+                vel=excluded.vel,
+                cog=excluded.cog,
+                batt=excluded.batt,
+                timestamp=excluded.timestamp,
+                rua_cache=excluded.rua_cache,
+                rua_cache_ts=excluded.rua_cache_ts,
+                poi_cache=excluded.poi_cache,
+                poi_cache_ts=excluded.poi_cache_ts,
+                poi_cache_cog=excluded.poi_cache_cog,
+                estado_movimento=excluded.estado_movimento
+        """, (
+            nome.lower(),
+            data["lat"], data["lon"],
+            data.get("vel", 0),
+            data.get("cog", 0),
+            data.get("batt", 0),
+            data["timestamp"],
+            data.get("rua_cache"),
+            data.get("rua_cache_ts"),
+            data.get("poi_cache"),
+            data.get("poi_cache_ts"),
+            data.get("poi_cache_cog"),
+            data["estado_movimento"]
+        ))
+        conn.commit()
+
+def buscar_posicao(nome):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM ultima_posicao WHERE nome=?", (nome.lower(),))
+        r = cur.fetchone()
+        return dict(r) if r else None
+
+# ==============================
+# UPDATE
 # ==============================
 @app.route("/update", methods=["POST"])
 def update():
@@ -204,18 +200,60 @@ def update():
     if not data or "nome" not in data:
         return jsonify({"erro": "Dados inválidos"}), 400
 
-    data["timestamp"] = data.get("timestamp", int(time.time()))
+    agora = int(time.time())
+    data["timestamp"] = data.get("timestamp", agora)
 
-    if "vel" in data and data["vel"] > 0.5:
-        data["estado_movimento"] = "andando"
+    pos_ant = buscar_posicao(data["nome"])
+
+    # Estado
+    data["estado_movimento"] = "andando" if data.get("vel", 0) > 0.5 else "parado"
+
+    # ----- CACHE DE RUA -----
+    precisa_rua = (
+        not pos_ant or
+        not pos_ant.get("rua_cache") or
+        agora - (pos_ant.get("rua_cache_ts") or 0) > 600 or
+        distancia_metros(pos_ant["lat"], pos_ant["lon"], data["lat"], data["lon"]) > 50
+    )
+
+    if precisa_rua:
+        rua = latlon_para_rua(data["lat"], data["lon"])
+        if rua:
+            data["rua_cache"] = rua
+            data["rua_cache_ts"] = agora
+        else:
+            data["rua_cache"] = pos_ant.get("rua_cache") if pos_ant else None
+            data["rua_cache_ts"] = pos_ant.get("rua_cache_ts") if pos_ant else None
     else:
-        data["estado_movimento"] = "parado"
+        data["rua_cache"] = pos_ant["rua_cache"]
+        data["rua_cache_ts"] = pos_ant["rua_cache_ts"]
+
+    # ----- CACHE DE POI -----
+    precisa_poi = (
+        data["estado_movimento"] == "andando" and (
+            not pos_ant or
+            not pos_ant.get("poi_cache") or
+            agora - (pos_ant.get("poi_cache_ts") or 0) > 300 or
+            angulo_diferenca(pos_ant.get("poi_cache_cog", 0), data.get("cog", 0)) > 30 or
+            distancia_metros(pos_ant["lat"], pos_ant["lon"], data["lat"], data["lon"]) > 100
+        )
+    )
+
+    if precisa_poi:
+        poi = buscar_poi_a_frente(data["lat"], data["lon"], data.get("cog", 0))
+        data["poi_cache"] = poi
+        data["poi_cache_ts"] = agora
+        data["poi_cache_cog"] = data.get("cog", 0)
+    else:
+        data["poi_cache"] = pos_ant.get("poi_cache") if pos_ant else None
+        data["poi_cache_ts"] = pos_ant.get("poi_cache_ts") if pos_ant else None
+        data["poi_cache_cog"] = pos_ant.get("poi_cache_cog") if pos_ant else None
 
     salvar_posicao(data["nome"], data)
     return jsonify({"status": "ok"})
 
 # ==============================
-# /where
+# WHERE
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -223,20 +261,15 @@ def onde_esta(nome):
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    lat = pos["lat"]
-    lon = pos["lon"]
+    local = verificar_regioes(pos["lat"], pos["lon"]) or pos["rua_cache"] or "esse local"
+    verbo = "está parado" if pos["estado_movimento"] == "parado" else "está passando"
 
-    regiao = verificar_regioes(lat, lon)
-    local = regiao or pos.get("rua_cache") or "esse local"
-
-    estado = pos["estado_movimento"]
-    verbo = "está parado" if estado == "parado" else "está passando"
-
-    texto = f"{nome.capitalize()} {verbo} próximo a {local}. Você quer mais detalhes?"
-    return jsonify({"resposta": texto})
+    return jsonify({
+        "resposta": f"{nome.capitalize()} {verbo} próximo a {local}. Você quer mais detalhes?"
+    })
 
 # ==============================
-# /details
+# DETAILS
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
@@ -246,44 +279,17 @@ def detalhes(nome):
 
     agora = int(time.time())
     delta = agora - pos["timestamp"]
-    tempo = formatar_tempo(delta)
 
-    lat = pos["lat"]
-    lon = pos["lon"]
-    estado = pos["estado_movimento"]
-
-    regiao = verificar_regioes(lat, lon)
-    local = regiao or pos.get("rua_cache") or "esse local"
-
-    if estado == "parado":
-        texto = f"Essa pessoa está parada nesse local há {tempo}, bateria {pos['batt']}%."
-        precisa_salvar = regiao is None
-        if precisa_salvar:
-            texto += " Você quer salvar um nome para essa região?"
+    if pos["estado_movimento"] == "parado":
+        texto = f"Essa pessoa está parada nesse local, bateria {pos['batt']}%."
     else:
-        vel_kmh = round(pos["vel"] * 3.6)
-        ritmo = "rápido" if vel_kmh > 7 else "devagar"
-        quando = "agora" if delta < 120 else f"há {tempo}"
-        verbo = "está passando" if delta < 120 else "passou próximo"
+        direcao = f" em direção à {pos['poi_cache']}" if pos.get("poi_cache") else ""
+        texto = f"Essa pessoa está passando por esse local{direcao}, bateria {pos['batt']}%."
 
-        poi = buscar_poi_a_frente(lat, lon, pos["cog"])
-        direcao_poi = f" em direção à {poi}" if poi else ""
-
-        texto = (
-            f"Essa pessoa {verbo} {ritmo} por esse local {quando}"
-            f"{direcao_poi}, bateria {pos['batt']}%."
-        )
-        precisa_salvar = False
-
-    return jsonify({
-        "detalhes": texto,
-        "precisa_salvar_regiao": precisa_salvar,
-        "lat": lat,
-        "lon": lon
-    })
+    return jsonify({"detalhes": texto})
 
 # ==============================
-# Init
+# INIT
 # ==============================
 init_db()
 
