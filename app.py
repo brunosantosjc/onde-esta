@@ -193,6 +193,21 @@ def latlon_para_rua(lat, lon):
     except:
         return None
 
+def extrair_bairro(lat, lon):
+    """Extrai apenas o bairro da coordenada usando Nominatim"""
+    try:
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {"lat": lat, "lon": lon, "format": "json", "addressdetails": 1, "zoom": 18}
+        headers = {"User-Agent": "OndeEsta/1.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        address = data.get("address", {})
+        bairro = address.get("suburb") or address.get("neighbourhood")
+        return bairro
+    except:
+        return None
+
 def buscar_poi_em_raio(lat, lon, raio_metros):
     """Busca POI usando Overpass API do OpenStreetMap"""
     try:
@@ -308,11 +323,21 @@ def proximo_poi(lat, lon, cog):
         # Buscar POI próximo ao ponto projetado
         poi = buscar_poi_em_raio(lat2, lon2, 100)
         if poi:
+            # Adicionar bairro ao POI encontrado
+            bairro = extrair_bairro(lat2, lon2)
+            if bairro:
+                return f"{poi} em {bairro}"
             return poi
     
     # Se não encontrou nada à frente, buscar POI genérico próximo
     poi_generico = buscar_poi_em_raio(lat, lon, 200)
-    return poi_generico or "essa região"
+    if poi_generico:
+        bairro = extrair_bairro(lat, lon)
+        if bairro:
+            return f"{poi_generico} em {bairro}"
+        return poi_generico
+    
+    return "essa região"
 
 # ==============================
 # Determinar local com prioridade
@@ -321,8 +346,8 @@ def determinar_local_prioritario(lat, lon):
     """
     Retorna o local seguindo a ordem de prioridade:
     1. Região salva no banco (raio específico)
-    2. POI a 500m (Overpass API)
-    3. POI a 1000m (Overpass API)
+    2. POI a 500m (Overpass API) + bairro
+    3. POI a 1000m (Overpass API) + bairro
     4. Rua + Bairro + Cidade (Nominatim)
     """
     # 1. Verificar regiões salvas
@@ -330,14 +355,20 @@ def determinar_local_prioritario(lat, lon):
     if regioes_salvas:
         return regioes_salvas[0]
     
-    # 2. POI a 500m usando Overpass
+    # 2. POI a 500m usando Overpass + bairro
     poi_500 = buscar_poi_em_raio(lat, lon, 500)
     if poi_500:
+        bairro = extrair_bairro(lat, lon)
+        if bairro:
+            return f"{poi_500} em {bairro}"
         return poi_500
     
-    # 3. POI a 1000m usando Overpass
+    # 3. POI a 1000m usando Overpass + bairro
     poi_1000 = buscar_poi_em_raio(lat, lon, 1000)
     if poi_1000:
+        bairro = extrair_bairro(lat, lon)
+        if bairro:
+            return f"{poi_1000} em {bairro}"
         return poi_1000
     
     # 4. Fallback: rua + bairro + cidade usando Nominatim
