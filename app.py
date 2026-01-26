@@ -194,50 +194,95 @@ def latlon_para_rua(lat, lon):
         return None
 
 def buscar_poi_em_raio(lat, lon, raio_metros):
-    """Busca POI usando busca do Nominatim em um raio"""
+    """Busca POI usando Overpass API do OpenStreetMap"""
     try:
-        url = "https://nominatim.openstreetmap.org/search"
-        params = {
-            "format": "json",
-            "lat": lat,
-            "lon": lon,
-            "addressdetails": 1,
-            "limit": 10,
-            "radius": raio_metros
-        }
-        headers = {"User-Agent": "OndeEsta/1.0"}
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        r.raise_for_status()
-        results = r.json()
+        # Query Overpass para buscar POIs próximos
+        overpass_url = "https://overpass-api.de/api/interpreter"
         
-        for result in results:
-            address = result.get("address", {})
+        # Categorias de POIs em ordem de prioridade
+        categorias = [
+            # Transporte público (prioridade máxima)
+            'node["railway"="station"](around:{raio},{lat},{lon});',
+            'node["railway"="subway_entrance"](around:{raio},{lat},{lon});',
+            'node["public_transport"="station"](around:{raio},{lat},{lon});',
+            'node["amenity"="bus_station"](around:{raio},{lat},{lon});',
+            # Locais importantes
+            'node["amenity"="hospital"](around:{raio},{lat},{lon});',
+            'node["amenity"="school"](around:{raio},{lat},{lon});',
+            'node["amenity"="university"](around:{raio},{lat},{lon});',
+            'node["shop"="mall"](around:{raio},{lat},{lon});',
+            'node["shop"="supermarket"](around:{raio},{lat},{lon});',
+            'node["amenity"="theatre"](around:{raio},{lat},{lon});',
+            'node["amenity"="cinema"](around:{raio},{lat},{lon});',
+            'node["leisure"="park"](around:{raio},{lat},{lon});',
+            'node["leisure"="stadium"](around:{raio},{lat},{lon});',
+            'node["amenity"="restaurant"](around:{raio},{lat},{lon});',
+            'node["amenity"="cafe"](around:{raio},{lat},{lon});',
+        ]
+        
+        # Montar query
+        query_parts = []
+        for cat in categorias:
+            query_parts.append(cat.format(raio=raio_metros, lat=lat, lon=lon))
+        
+        overpass_query = f"""
+        [out:json][timeout:10];
+        (
+            {' '.join(query_parts)}
+        );
+        out body 1;
+        """
+        
+        response = requests.post(
+            overpass_url,
+            data={"data": overpass_query},
+            timeout=15
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get("elements"):
+            elemento = data["elements"][0]
+            tags = elemento.get("tags", {})
+            nome = tags.get("name", "")
             
-            # Verificar POIs de transporte
-            if "train_station" in address:
-                return f"Estação {address['train_station']}"
-            if "bus_station" in address:
-                return f"Estação {address['bus_station']}"
-            if "subway" in address:
-                return f"Estação {address['subway']} do Metrô"
-            
-            # Outros POIs
-            pois_importantes = [
-                ("hospital", "Hospital"),
-                ("school", "Escola"),
-                ("university", "Universidade"),
-                ("shopping_center", "Shopping"),
-                ("supermarket", "Supermercado"),
-                ("park", "Parque"),
-                ("stadium", "Estádio"),
-            ]
-            
-            for key, prefix in pois_importantes:
-                if key in address:
-                    return f"{prefix} {address[key]}"
+            # Determinar tipo de POI
+            if tags.get("railway") == "station":
+                return f"Estação {nome}" if nome else "Estação de Trem"
+            elif tags.get("railway") == "subway_entrance":
+                return f"Estação {nome} do Metrô" if nome else "Estação do Metrô"
+            elif tags.get("public_transport") == "station":
+                return f"Estação {nome}" if nome else "Estação"
+            elif tags.get("amenity") == "bus_station":
+                return f"Terminal {nome}" if nome else "Terminal de Ônibus"
+            elif tags.get("amenity") == "hospital":
+                return f"Hospital {nome}" if nome else "Hospital"
+            elif tags.get("amenity") == "school":
+                return f"Escola {nome}" if nome else "Escola"
+            elif tags.get("amenity") == "university":
+                return f"Universidade {nome}" if nome else "Universidade"
+            elif tags.get("shop") == "mall":
+                return f"Shopping {nome}" if nome else "Shopping"
+            elif tags.get("shop") == "supermarket":
+                return f"Supermercado {nome}" if nome else "Supermercado"
+            elif tags.get("amenity") == "theatre":
+                return f"Teatro {nome}" if nome else "Teatro"
+            elif tags.get("amenity") == "cinema":
+                return f"Cinema {nome}" if nome else "Cinema"
+            elif tags.get("leisure") == "park":
+                return f"Parque {nome}" if nome else "Parque"
+            elif tags.get("leisure") == "stadium":
+                return f"Estádio {nome}" if nome else "Estádio"
+            elif tags.get("amenity") == "restaurant":
+                return f"Restaurante {nome}" if nome else "Restaurante"
+            elif tags.get("amenity") == "cafe":
+                return f"Café {nome}" if nome else "Café"
+            elif nome:
+                return nome
         
         return None
-    except:
+    except Exception as e:
+        print(f"Erro ao buscar POI via Overpass: {e}")
         return None
 
 # ==============================
@@ -253,17 +298,21 @@ def grau_para_direcao(cog):
 # Próximo POI à frente
 # ==============================
 def proximo_poi(lat, lon, cog):
-    """Busca o próximo POI na direção do movimento"""
-    # Projeção para frente (aprox. 200-500m)
-    for distancia in [0.002, 0.005]:  # ~200m, ~500m
+    """Busca o próximo POI na direção do movimento usando Overpass API"""
+    # Projeção para frente em diferentes distâncias
+    for distancia_km in [0.0002, 0.0005, 0.001]:  # ~20m, ~50m, ~100m
         rad = math.radians(cog)
-        lat2 = lat + distancia * math.cos(rad)
-        lon2 = lon + distancia * math.sin(rad)
-        poi = latlon_para_rua(lat2, lon2)
-        if poi and poi != "essa região":
+        lat2 = lat + distancia_km * math.cos(rad)
+        lon2 = lon + distancia_km * math.sin(rad) / math.cos(math.radians(lat))
+        
+        # Buscar POI próximo ao ponto projetado
+        poi = buscar_poi_em_raio(lat2, lon2, 100)
+        if poi:
             return poi
     
-    return "essa região"
+    # Se não encontrou nada à frente, buscar POI genérico próximo
+    poi_generico = buscar_poi_em_raio(lat, lon, 200)
+    return poi_generico or "essa região"
 
 # ==============================
 # Determinar local com prioridade
@@ -272,26 +321,26 @@ def determinar_local_prioritario(lat, lon):
     """
     Retorna o local seguindo a ordem de prioridade:
     1. Região salva no banco (raio específico)
-    2. POI a 100m
-    3. POI a 500m
-    4. Rua + Bairro + Cidade
+    2. POI a 100m (Overpass API)
+    3. POI a 500m (Overpass API)
+    4. Rua + Bairro + Cidade (Nominatim)
     """
     # 1. Verificar regiões salvas
     regioes_salvas = verificar_regioes(lat, lon)
     if regioes_salvas:
         return regioes_salvas[0]
     
-    # 2. POI a 100m
+    # 2. POI a 100m usando Overpass
     poi_100 = buscar_poi_em_raio(lat, lon, 100)
     if poi_100:
         return poi_100
     
-    # 3. POI a 500m
+    # 3. POI a 500m usando Overpass
     poi_500 = buscar_poi_em_raio(lat, lon, 500)
     if poi_500:
         return poi_500
     
-    # 4. Fallback: rua + bairro + cidade
+    # 4. Fallback: rua + bairro + cidade usando Nominatim
     return latlon_para_rua(lat, lon) or "essa região"
 
 # ==============================
