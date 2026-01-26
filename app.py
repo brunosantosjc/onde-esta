@@ -142,7 +142,7 @@ def formatar_tempo(segundos):
     return texto
 
 # ==============================
-# Reverse Geocoding
+# Reverse Geocoding com POI
 # ==============================
 def latlon_para_rua(lat, lon):
     try:
@@ -153,6 +153,13 @@ def latlon_para_rua(lat, lon):
         r.raise_for_status()
         data = r.json()
         address = data.get("address", {})
+        # POI mais específico
+        if "train_station" in address:
+            return f"Estação {address['train_station']}"
+        if "bus_station" in address:
+            return f"Estação {address['bus_station']}"
+        if "subway" in address:
+            return f"Estação {address['subway']}"
         rua = address.get("road")
         bairro = address.get("suburb") or address.get("neighbourhood")
         cidade = address.get("city") or address.get("town")
@@ -169,6 +176,18 @@ def grau_para_direcao(cog):
                 "sul", "sudoeste", "oeste", "noroeste"]
     idx = round(cog / 45) % 8
     return direcoes[idx]
+
+# ==============================
+# Próximo POI à frente (simples)
+# ==============================
+def proximo_poi(lat, lon, cog):
+    # Pequena projeção para frente (aprox. 100m)
+    delta = 0.001  # ~100m
+    rad = math.radians(cog)
+    lat2 = lat + delta * math.cos(rad)
+    lon2 = lon + delta * math.sin(rad)
+    poi = latlon_para_rua(lat2, lon2)
+    return poi or "essa região"
 
 # ==============================
 # Webhook OwnTracks
@@ -276,7 +295,7 @@ def health():
     return "OwnTracks endpoint ativo", 200
 
 # ==============================
-# /where/<nome> - ajustado para usar região salva
+# /where/<nome> - ajustado para POI
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -291,13 +310,14 @@ def onde_esta(nome):
 
     estado = pos.get("estado_movimento")
     if estado == "parado":
-        texto = f"{nome.capitalize()} está parado próximo de {local}."
+        texto = f"{nome.capitalize()} está parado próximo a {local}. Você quer mais detalhes?"
     else:
-        texto = f"{nome.capitalize()} está passando próximo de {local}."
+        poi_frente = proximo_poi(lat, lon, pos.get("cog", 0))
+        texto = f"{nome.capitalize()} está passando próximo a {local} em direção à {poi_frente}. Você quer mais detalhes?"
     return jsonify({"resposta": texto})
 
 # ==============================
-# /details/<nome> - interativo para salvar região (apenas se parado)
+# /details/<nome> - aprimorado
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
@@ -305,7 +325,8 @@ def detalhes(nome):
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    tempo = formatar_tempo(int(time.time()) - pos["timestamp"])
+    tempo_seg = int(time.time()) - pos["timestamp"]
+    tempo = formatar_tempo(tempo_seg)
     estado = pos.get("estado_movimento")
     lat = pos["lat"]
     lon = pos["lon"]
@@ -315,11 +336,11 @@ def detalhes(nome):
     local = ", ".join(regioes_atuais) if regioes_atuais else pos.get("rua_cache") or "essa região"
 
     if estado == "parado":
-        texto = f"Essa pessoa está parada nesse local há {tempo}, bateria {pos['batt']}%."
+        texto = f"Essa pessoa está parada nesse local há {tempo}, bateria do celular em {pos['batt']}%."
     else:
         vel_kmh = round(pos["vel"] * 3.6)
-        direcao = grau_para_direcao(pos["cog"])
-        texto = f"Essa pessoa está em movimento a {vel_kmh} km/h, indo para {direcao}, por {local}. Última atualização há {tempo}, bateria {pos['batt']}%."
+        ritmo = "rápido" if vel_kmh > 7 else "devagar"
+        texto = f"Essa pessoa está passando {ritmo} por esse local {('agora' if tempo_seg < 120 else 'há ' + tempo)}, bateria do celular em {pos['batt']}%."
 
     return jsonify({
         "detalhes": texto,
