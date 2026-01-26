@@ -1,193 +1,374 @@
 from flask import Flask, request, jsonify
 import requests
 import time
-import psycopg2
-import psycopg2.extras
-import os
-import logging
+import sqlite3
+import math
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
 
-DATABASE_URL = os.environ.get("DATABASE_URL")
+DB_PATH = "localizacoes.db"
+
+# ==============================
+# DEBUG
+# ==============================
+@app.route("/debug", methods=["GET"])
+def debug():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM ultima_posicao")
+        rows = cur.fetchall()
+    return jsonify({
+        "total_registros": len(rows),
+        "dados": [dict(r) for r in rows]
+    })
 
 # ==============================
 # Banco de Dados
 # ==============================
-def get_conn():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL não configurada")
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
-
 def init_db():
-    try:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS ultima_posicao (
-                        nome TEXT PRIMARY KEY,
-                        lat DOUBLE PRECISION,
-                        lon DOUBLE PRECISION,
-                        vel DOUBLE PRECISION,
-                        cog DOUBLE PRECISION,
-                        batt INTEGER,
-                        timestamp INTEGER,
-                        rua_cache TEXT,
-                        rua_cache_ts INTEGER,
-                        estado_movimento TEXT
-                    );
-                """)
-            conn.commit()
-        app.logger.info("Banco inicializado")
-    except Exception as e:
-        app.logger.error("Erro no banco: %s", e)
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ultima_posicao (
+                nome TEXT PRIMARY KEY,
+                lat REAL,
+                lon REAL,
+                vel REAL,
+                cog REAL,
+                batt INTEGER,
+                timestamp INTEGER,
+                rua_cache TEXT,
+                rua_cache_ts INTEGER,
+                estado_movimento TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS regioes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome TEXT UNIQUE,
+                lat REAL NOT NULL,
+                lon REAL NOT NULL,
+                raio_metros REAL NOT NULL
+            )
+        """)
+        conn.commit()
+
+def salvar_posicao(nome, data):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO ultima_posicao (
+                nome, lat, lon, vel, cog, batt,
+                timestamp, rua_cache, rua_cache_ts, estado_movimento
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(nome) DO UPDATE SET
+                lat=excluded.lat,
+                lon=excluded.lon,
+                vel=excluded.vel,
+                cog=excluded.cog,
+                batt=excluded.batt,
+                timestamp=excluded.timestamp,
+                rua_cache=excluded.rua_cache,
+                rua_cache_ts=excluded.rua_cache_ts,
+                estado_movimento=excluded.estado_movimento
+        """, (
+            nome,
+            data["lat"],
+            data["lon"],
+            data["vel"],
+            data["cog"],
+            data["batt"],
+            data["timestamp"],
+            data.get("rua_cache"),
+            data.get("rua_cache_ts"),
+            data.get("estado_movimento")
+        ))
+        conn.commit()
+
+def buscar_posicao(nome):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM ultima_posicao WHERE nome = ?", (nome,))
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+def salvar_regiao(nome, lat, lon, raio_metros=40):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            INSERT INTO regioes (nome, lat, lon, raio_metros)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(nome) DO UPDATE SET
+                lat=excluded.lat,
+                lon=excluded.lon,
+                raio_metros=excluded.raio_metros
+        """, (nome, lat, lon, raio_metros))
+        conn.commit()
+
+def verificar_regioes(lat, lon):
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM regioes")
+        regioes = cur.fetchall()
+    resultado = []
+    for r in regioes:
+        if distancia_metros(lat, lon, r["lat"], r["lon"]) <= r["raio_metros"]:
+            resultado.append(r["nome"])
+    return resultado
 
 # ==============================
 # Utilidades
 # ==============================
+def distancia_metros(lat1, lon1, lat2, lon2):
+    R = 6371000
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dphi / 2) ** 2 +
+        math.cos(phi1) * math.cos(phi2) *
+        math.sin(dlambda / 2) ** 2
+    )
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def formatar_tempo(segundos):
+    minutos = max(1, int(segundos / 60))
+    if minutos < 60:
+        return f"{minutos} minuto{'s' if minutos != 1 else ''}"
+    horas = minutos // 60
+    resto = minutos % 60
+    texto = f"{horas} hora{'s' if horas != 1 else ''}"
+    if resto:
+        texto += f" e {resto} minuto{'s' if resto != 1 else ''}"
+    return texto
+
+# ==============================
+# Reverse Geocoding
+# ==============================
 def latlon_para_rua(lat, lon):
     try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={
-                "lat": lat,
-                "lon": lon,
-                "format": "jsonv2",
-                "zoom": 18
-            },
-            headers={"User-Agent": "OndeEsta/1.0"},
-            timeout=10
-        )
-        return r.json().get("display_name")
-    except Exception as e:
-        app.logger.warning("Reverse geocode falhou: %s", e)
+        url = "https://nominatim.openstreetmap.org/reverse"
+        params = {"lat": lat, "lon": lon, "format": "json", "addressdetails": 1, "zoom": 18}
+        headers = {"User-Agent": "OndeEsta/1.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        address = data.get("address", {})
+        rua = address.get("road")
+        bairro = address.get("suburb") or address.get("neighbourhood")
+        cidade = address.get("city") or address.get("town")
+        partes = [p for p in [rua, bairro, cidade] if p]
+        return ", ".join(partes) if partes else None
+    except:
         return None
 
 # ==============================
-# Persistência
+# Direção
 # ==============================
-def salvar_posicao(data):
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO ultima_posicao (
-                    nome, lat, lon, vel, cog, batt, timestamp,
-                    rua_cache, rua_cache_ts, estado_movimento
-                )
-                VALUES (
-                    %(nome)s, %(lat)s, %(lon)s, %(vel)s, %(cog)s, %(batt)s,
-                    %(timestamp)s, %(rua_cache)s, %(rua_cache_ts)s,
-                    %(estado_movimento)s
-                )
-                ON CONFLICT (nome) DO UPDATE SET
-                    lat=EXCLUDED.lat,
-                    lon=EXCLUDED.lon,
-                    vel=EXCLUDED.vel,
-                    cog=EXCLUDED.cog,
-                    batt=EXCLUDED.batt,
-                    timestamp=EXCLUDED.timestamp,
-                    rua_cache=EXCLUDED.rua_cache,
-                    rua_cache_ts=EXCLUDED.rua_cache_ts,
-                    estado_movimento=EXCLUDED.estado_movimento
-            """, data)
-        conn.commit()
-
-def buscar_posicao(nome):
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute(
-                "SELECT * FROM ultima_posicao WHERE nome=%s",
-                (nome,)
-            )
-            r = cur.fetchone()
-            return dict(r) if r else None
+def grau_para_direcao(cog):
+    direcoes = ["norte", "nordeste", "leste", "sudeste",
+                "sul", "sudoeste", "oeste", "noroeste"]
+    idx = round(cog / 45) % 8
+    return direcoes[idx]
 
 # ==============================
-# ROTAS
+# Webhook OwnTracks
 # ==============================
-
-@app.route("/")
-def home():
-    return "API OndeEstá ONLINE"
-
-@app.route("/health")
-def health():
-    try:
-        with get_conn():
-            return jsonify({"status": "ok"})
-    except:
-        return jsonify({"status": "db_error"}), 500
-
-@app.route("/update", methods=["POST"])
-def update():
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"erro": "JSON inválido"}), 400
-
-    # 🔑 DEVICE ID OBRIGATÓRIO
-    nome = data.get("nome")
-    if not nome:
-        return jsonify({"erro": "Device ID ausente (campo nome)"}), 400
-
-    nome = nome.lower()
-
-    if "lat" not in data or "lon" not in data:
-        return jsonify({"erro": "lat e lon são obrigatórios"}), 400
-
-    vel = float(data.get("vel", 0))
-    cog = float(data.get("cog", 0))
-    batt = int(data.get("batt", 0))
+@app.route("/", methods=["POST"])
+def owntracks_webhook():
+    data = request.json or {}
+    if data.get("_type") != "location":
+        return jsonify({"status": "ok"})
 
     agora = int(time.time())
+    CACHE_RUA_MAX = 15 * 60
 
-    estado = "andando" if vel > 0.5 else "parado"
+    topic = data.get("topic", "")
+    partes = topic.split("/")
+    if len(partes) < 3:
+        return jsonify({"erro": "Topic inválido"}), 400
 
-    rua = latlon_para_rua(data["lat"], data["lon"])
+    nome = partes[2].lower()
+    lat = data.get("lat")
+    lon = data.get("lon")
+    vel_ot_ms = data.get("vel", 0) or 0
+    cog = data.get("cog", 0)
+    batt = data.get("batt")
+    timestamp = data.get("tst", agora)
 
-    data_final = {
-        "nome": nome,
-        "lat": data["lat"],
-        "lon": data["lon"],
-        "vel": vel,
+    anterior = buscar_posicao(nome)
+    rua_cache = anterior.get("rua_cache") if anterior else None
+    rua_cache_ts = anterior.get("rua_cache_ts") if anterior else None
+    estado_anterior = anterior.get("estado_movimento") if anterior else "parado"
+
+    vel_final_ms = vel_ot_ms
+    estado_movimento = estado_anterior
+
+    if anterior:
+        dt = timestamp - anterior["timestamp"]
+        if dt > 0:
+            dist = distancia_metros(anterior["lat"], anterior["lon"], lat, lon)
+            vel_calc_ms = dist / dt if dt >= 5 else 0
+            vel_calc_kmh = vel_calc_ms * 3.6
+            vel_ot_kmh = vel_ot_ms * 3.6
+
+            if 5 < vel_ot_kmh < 160:
+                vel_final_ms = vel_ot_ms
+            elif vel_calc_kmh < 160:
+                vel_final_ms = vel_calc_ms
+            else:
+                vel_final_ms = 0
+
+            if estado_anterior == "parado":
+                if dist >= 50 and dt >= 10:
+                    estado_movimento = "movimento"
+                elif vel_ot_kmh >= 8:
+                    estado_movimento = "movimento"
+                else:
+                    estado_movimento = "parado"
+            elif estado_anterior == "movimento":
+                if dist < 20 and dt >= 90:
+                    estado_movimento = "parado"
+                elif vel_ot_kmh <= 3:
+                    estado_movimento = "parado"
+                else:
+                    estado_movimento = "movimento"
+
+            precisa_atualizar_rua = False
+            if dist > 50 or not rua_cache_ts or (agora - rua_cache_ts) > CACHE_RUA_MAX:
+                precisa_atualizar_rua = True
+            if precisa_atualizar_rua:
+                novo_local = latlon_para_rua(lat, lon)
+                if novo_local:
+                    rua_cache = novo_local
+                    rua_cache_ts = agora
+
+    if not rua_cache:
+        rua_cache = latlon_para_rua(lat, lon)
+        rua_cache_ts = agora
+
+    salvar_posicao(nome, {
+        "lat": lat,
+        "lon": lon,
+        "vel": vel_final_ms,
         "cog": cog,
         "batt": batt,
-        "timestamp": agora,
-        "estado_movimento": estado,
-        "rua_cache": rua,
-        "rua_cache_ts": agora
+        "timestamp": timestamp,
+        "rua_cache": rua_cache,
+        "rua_cache_ts": rua_cache_ts,
+        "estado_movimento": estado_movimento
+    })
+
+    config = {
+        "_type": "configuration",
+        "mode": 3,
+        "interval": 60 if estado_movimento == "movimento" else 300,
+        "accuracy": 50 if estado_movimento == "movimento" else 100,
+        "keepalive": 30 if estado_movimento == "movimento" else 60
     }
 
-    app.logger.info("UPDATE %s: %s", nome, data_final)
+    return jsonify(config)
 
-    salvar_posicao(data_final)
-    return jsonify({"status": "ok", "device": nome})
+# ==============================
+# Health
+# ==============================
+@app.route("/", methods=["GET"])
+def health():
+    return "OwnTracks endpoint ativo", 200
 
+# ==============================
+# /where/<nome> - ajustado para usar região salva
+# ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
     pos = buscar_posicao(nome.lower())
     if not pos:
-        return jsonify({"erro": "Dispositivo não encontrado"}), 404
+        return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    verbo = "está parado" if pos["estado_movimento"] == "parado" else "está passando"
-    local = pos["rua_cache"] or "esse local"
+    lat = pos["lat"]
+    lon = pos["lon"]
+    regioes_atuais = verificar_regioes(lat, lon)
+    local = regioes_atuais[0] if regioes_atuais else pos.get("rua_cache") or "essa região"
 
-    return jsonify({
-        "resposta": f"{nome.capitalize()} {verbo} próximo a {local}."
-    })
-
-@app.route("/debug")
-def debug():
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            cur.execute("SELECT * FROM ultima_posicao")
-            rows = cur.fetchall()
-            return jsonify({
-                "total": len(rows),
-                "dados": [dict(r) for r in rows]
-            })
+    estado = pos.get("estado_movimento")
+    if estado == "parado":
+        texto = f"{nome.capitalize()} está parado próximo de {local}."
+    else:
+        texto = f"{nome.capitalize()} está passando próximo de {local}."
+    return jsonify({"resposta": texto})
 
 # ==============================
-# INIT
+# /details/<nome> - interativo para salvar região (apenas se parado)
+# ==============================
+@app.route("/details/<nome>")
+def detalhes(nome):
+    pos = buscar_posicao(nome.lower())
+    if not pos:
+        return jsonify({"erro": "Pessoa não encontrada"}), 404
+
+    tempo = formatar_tempo(int(time.time()) - pos["timestamp"])
+    estado = pos.get("estado_movimento")
+    lat = pos["lat"]
+    lon = pos["lon"]
+
+    regioes_atuais = verificar_regioes(lat, lon)
+    precisa_salvar = len(regioes_atuais) == 0 and estado == "parado"
+    local = ", ".join(regioes_atuais) if regioes_atuais else pos.get("rua_cache") or "essa região"
+
+    if estado == "parado":
+        texto = f"Essa pessoa está parada nesse local há {tempo}, bateria {pos['batt']}%."
+    else:
+        vel_kmh = round(pos["vel"] * 3.6)
+        direcao = grau_para_direcao(pos["cog"])
+        texto = f"Essa pessoa está em movimento a {vel_kmh} km/h, indo para {direcao}, por {local}. Última atualização há {tempo}, bateria {pos['batt']}%."
+
+    return jsonify({
+        "detalhes": texto,
+        "precisa_salvar_regiao": precisa_salvar,
+        "lat": lat,
+        "lon": lon
+    })
+
+# ==============================
+# Endpoint para salvar região manualmente
+# ==============================
+@app.route("/salvar_regiao_manual", methods=["POST"])
+def salvar_regiao_manual():
+    data = request.json or {}
+    nome_regiao = data.get("nome")
+    lat = data.get("lat")
+    lon = data.get("lon")
+
+    if not nome_regiao or lat is None or lon is None:
+        return jsonify({"erro": "Dados insuficientes"}), 400
+
+    try:
+        lat = float(lat)
+        lon = float(lon)
+        salvar_regiao(nome_regiao, lat, lon, 40)  # Raio ajustado para 40 metros
+        return jsonify({"status": "ok", "mensagem": f"Região '{nome_regiao}' salva com sucesso."})
+    except Exception as e:
+        return jsonify({"erro": "Falha ao salvar região", "detalhes": str(e)}), 500
+
+# ==============================
+# Listar todas as regiões
+# ==============================
+@app.route("/regioes", methods=["GET"])
+def listar_regioes():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.execute("SELECT * FROM regioes")
+            regioes = cur.fetchall()
+        return jsonify({
+            "total": len(regioes),
+            "regioes": [dict(r) for r in regioes]
+        })
+    except Exception as e:
+        print("Erro ao listar regiões:", e)
+        return jsonify({"erro": "Falha ao buscar regiões", "detalhes": str(e)}), 500
+
+# ==============================
+# Init
 # ==============================
 init_db()
 
