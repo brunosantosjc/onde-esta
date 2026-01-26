@@ -245,7 +245,7 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
         (
             {' '.join(query_parts)}
         );
-        out body 1;
+        out body 10;
         """
         
         response = requests.post(
