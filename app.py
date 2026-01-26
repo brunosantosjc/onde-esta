@@ -5,8 +5,10 @@ import psycopg2
 import psycopg2.extras
 import math
 import os
+import logging
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -49,9 +51,9 @@ def init_db():
                     );
                 """)
             conn.commit()
+        app.logger.info("Banco inicializado com sucesso")
     except Exception as e:
-        # NÃO derruba o gunicorn se o banco estiver fora
-        print("Erro ao inicializar banco:", e)
+        app.logger.error("Erro ao inicializar banco: %s", e)
 
 # ==============================
 # Utilidades
@@ -93,7 +95,8 @@ def latlon_para_rua(lat, lon):
             timeout=10
         )
         return r.json().get("display_name")
-    except:
+    except Exception as e:
+        app.logger.warning("Erro no reverse geocode: %s", e)
         return None
 
 # ==============================
@@ -137,7 +140,8 @@ def buscar_poi_a_frente(lat, lon, cog, raio=500):
                     melhor = nome
 
         return melhor
-    except:
+    except Exception as e:
+        app.logger.warning("Erro ao buscar POI: %s", e)
         return None
 
 # ==============================
@@ -187,67 +191,91 @@ def buscar_posicao(nome):
 # ==============================
 @app.route("/update", methods=["POST"])
 def update():
-    data = request.json
-    if not data or "nome" not in data:
-        return jsonify({"erro": "Dados inválidos"}), 400
+    data = request.get_json(silent=True) or {}
 
-    agora = int(time.time())
-    data["timestamp"] = agora
+    # Defaults seguros
+    data.setdefault("vel", 0)
+    data.setdefault("cog", 0)
+    data.setdefault("batt", 0)
 
-    pos_ant = buscar_posicao(data["nome"])
-    data["estado_movimento"] = "andando" if data.get("vel", 0) > 0.5 else "parado"
+    if "nome" not in data:
+        return jsonify({"erro": "Campo 'nome' obrigatório"}), 400
 
-    if not pos_ant or agora - (pos_ant.get("rua_cache_ts") or 0) > 600:
-        data["rua_cache"] = latlon_para_rua(data["lat"], data["lon"])
-        data["rua_cache_ts"] = agora
-    else:
-        data["rua_cache"] = pos_ant["rua_cache"]
-        data["rua_cache_ts"] = pos_ant["rua_cache_ts"]
+    if "lat" not in data or "lon" not in data:
+        return jsonify({"erro": "lat e lon são obrigatórios"}), 400
 
-    if data["estado_movimento"] == "andando":
-        data["poi_cache"] = buscar_poi_a_frente(data["lat"], data["lon"], data.get("cog", 0))
-        data["poi_cache_ts"] = agora
-        data["poi_cache_cog"] = data.get("cog", 0)
-    else:
-        data["poi_cache"] = pos_ant.get("poi_cache") if pos_ant else None
-        data["poi_cache_ts"] = pos_ant.get("poi_cache_ts") if pos_ant else None
-        data["poi_cache_cog"] = pos_ant.get("poi_cache_cog") if pos_ant else None
+    app.logger.info("UPDATE recebido: %s", data)
 
-    salvar_posicao(data["nome"], data)
-    return jsonify({"status": "ok"})
+    try:
+        agora = int(time.time())
+        data["timestamp"] = agora
+
+        pos_ant = buscar_posicao(data["nome"])
+        data["estado_movimento"] = "andando" if data["vel"] > 0.5 else "parado"
+
+        if not pos_ant or agora - (pos_ant.get("rua_cache_ts") or 0) > 600:
+            data["rua_cache"] = latlon_para_rua(data["lat"], data["lon"])
+            data["rua_cache_ts"] = agora
+        else:
+            data["rua_cache"] = pos_ant["rua_cache"]
+            data["rua_cache_ts"] = pos_ant["rua_cache_ts"]
+
+        if data["estado_movimento"] == "andando":
+            data["poi_cache"] = buscar_poi_a_frente(data["lat"], data["lon"], data["cog"])
+            data["poi_cache_ts"] = agora
+            data["poi_cache_cog"] = data["cog"]
+        else:
+            data["poi_cache"] = pos_ant.get("poi_cache") if pos_ant else None
+            data["poi_cache_ts"] = pos_ant.get("poi_cache_ts") if pos_ant else None
+            data["poi_cache_cog"] = pos_ant.get("poi_cache_cog") if pos_ant else None
+
+        salvar_posicao(data["nome"], data)
+        return jsonify({"status": "ok"})
+
+    except Exception as e:
+        app.logger.exception("Erro no /update")
+        return jsonify({"erro": "Erro interno"}), 500
 
 # ==============================
 # WHERE
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
-    pos = buscar_posicao(nome)
-    if not pos:
-        return jsonify({"erro": "Pessoa não encontrada"}), 404
+    try:
+        pos = buscar_posicao(nome)
+        if not pos:
+            return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    verbo = "está parado" if pos["estado_movimento"] == "parado" else "está passando"
-    local = pos["rua_cache"] or "esse local"
+        verbo = "está parado" if pos["estado_movimento"] == "parado" else "está passando"
+        local = pos["rua_cache"] or "esse local"
 
-    return jsonify({
-        "resposta": f"{nome.capitalize()} {verbo} próximo a {local}. Você quer mais detalhes?"
-    })
+        return jsonify({
+            "resposta": f"{nome.capitalize()} {verbo} próximo a {local}. Você quer mais detalhes?"
+        })
+    except Exception:
+        app.logger.exception("Erro no /where")
+        return jsonify({"erro": "Erro interno"}), 500
 
 # ==============================
 # DETAILS
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
-    pos = buscar_posicao(nome)
-    if not pos:
-        return jsonify({"erro": "Pessoa não encontrada"}), 404
+    try:
+        pos = buscar_posicao(nome)
+        if not pos:
+            return jsonify({"erro": "Pessoa não encontrada"}), 404
 
-    if pos["estado_movimento"] == "parado":
-        texto = f"Essa pessoa está parada nesse local, bateria {pos['batt']}%."
-    else:
-        direcao = f" em direção à {pos['poi_cache']}" if pos.get("poi_cache") else ""
-        texto = f"Essa pessoa está passando por esse local{direcao}, bateria {pos['batt']}%."
+        if pos["estado_movimento"] == "parado":
+            texto = f"Essa pessoa está parada nesse local, bateria {pos['batt']}%."
+        else:
+            direcao = f" em direção à {pos['poi_cache']}" if pos.get("poi_cache") else ""
+            texto = f"Essa pessoa está passando por esse local{direcao}, bateria {pos['batt']}%."
 
-    return jsonify({"detalhes": texto})
+        return jsonify({"detalhes": texto})
+    except Exception:
+        app.logger.exception("Erro no /details")
+        return jsonify({"erro": "Erro interno"}), 500
 
 # ==============================
 # DEBUG
@@ -258,10 +286,18 @@ def debug():
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
             cur.execute("SELECT * FROM ultima_posicao")
             rows = cur.fetchall()
-            return jsonify({
-                "total": len(rows),
-                "dados": [dict(r) for r in rows]
-            })
+            return jsonify({"total": len(rows), "dados": [dict(r) for r in rows]})
+
+# ==============================
+# HEALTH
+# ==============================
+@app.route("/health")
+def health():
+    try:
+        with get_conn():
+            return jsonify({"status": "ok"})
+    except:
+        return jsonify({"status": "db_error"}), 500
 
 # ==============================
 # INIT
