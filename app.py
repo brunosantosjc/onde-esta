@@ -14,38 +14,44 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # Banco de Dados
 # ==============================
 def get_conn():
+    if not DATABASE_URL:
+        raise RuntimeError("DATABASE_URL não configurada")
     return psycopg2.connect(DATABASE_URL, sslmode="require")
 
 def init_db():
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS ultima_posicao (
-                    nome TEXT PRIMARY KEY,
-                    lat DOUBLE PRECISION,
-                    lon DOUBLE PRECISION,
-                    vel DOUBLE PRECISION,
-                    cog DOUBLE PRECISION,
-                    batt INTEGER,
-                    timestamp INTEGER,
-                    rua_cache TEXT,
-                    rua_cache_ts INTEGER,
-                    poi_cache TEXT,
-                    poi_cache_ts INTEGER,
-                    poi_cache_cog DOUBLE PRECISION,
-                    estado_movimento TEXT
-                );
-            """)
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS regioes (
-                    id SERIAL PRIMARY KEY,
-                    nome TEXT UNIQUE,
-                    lat DOUBLE PRECISION,
-                    lon DOUBLE PRECISION,
-                    raio_metros DOUBLE PRECISION
-                );
-            """)
-        conn.commit()
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ultima_posicao (
+                        nome TEXT PRIMARY KEY,
+                        lat DOUBLE PRECISION,
+                        lon DOUBLE PRECISION,
+                        vel DOUBLE PRECISION,
+                        cog DOUBLE PRECISION,
+                        batt INTEGER,
+                        timestamp INTEGER,
+                        rua_cache TEXT,
+                        rua_cache_ts INTEGER,
+                        poi_cache TEXT,
+                        poi_cache_ts INTEGER,
+                        poi_cache_cog DOUBLE PRECISION,
+                        estado_movimento TEXT
+                    );
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS regioes (
+                        id SERIAL PRIMARY KEY,
+                        nome TEXT UNIQUE,
+                        lat DOUBLE PRECISION,
+                        lon DOUBLE PRECISION,
+                        raio_metros DOUBLE PRECISION
+                    );
+                """)
+            conn.commit()
+    except Exception as e:
+        # NÃO derruba o gunicorn se o banco estiver fora
+        print("Erro ao inicializar banco:", e)
 
 # ==============================
 # Utilidades
@@ -148,9 +154,9 @@ def salvar_posicao(nome, data):
                     estado_movimento
                 )
                 VALUES (
-                    %(nome)s,%(lat)s,%(lon)s,%(vel)s,%(cog)s,%(batt)s,%(timestamp)s,
-                    %(rua_cache)s,%(rua_cache_ts)s,
-                    %(poi_cache)s,%(poi_cache_ts)s,%(poi_cache_cog)s,
+                    %(nome)s, %(lat)s, %(lon)s, %(vel)s, %(cog)s, %(batt)s, %(timestamp)s,
+                    %(rua_cache)s, %(rua_cache_ts)s,
+                    %(poi_cache)s, %(poi_cache_ts)s, %(poi_cache_cog)s,
                     %(estado_movimento)s
                 )
                 ON CONFLICT (nome) DO UPDATE SET
@@ -187,8 +193,8 @@ def update():
 
     agora = int(time.time())
     data["timestamp"] = agora
-    pos_ant = buscar_posicao(data["nome"])
 
+    pos_ant = buscar_posicao(data["nome"])
     data["estado_movimento"] = "andando" if data.get("vel", 0) > 0.5 else "parado"
 
     if not pos_ant or agora - (pos_ant.get("rua_cache_ts") or 0) > 600:
