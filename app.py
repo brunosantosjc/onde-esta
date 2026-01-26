@@ -71,12 +71,12 @@ def salvar_posicao(nome, data):
                 rua_cache_ts=excluded.rua_cache_ts,
                 estado_movimento=excluded.estado_movimento
         """, (
-            nome,
+            nome.lower(),
             data["lat"],
             data["lon"],
-            data["vel"],
-            data["cog"],
-            data["batt"],
+            data.get("vel", 0),
+            data.get("cog", 0),
+            data.get("batt", 0),
             data["timestamp"],
             data.get("rua_cache"),
             data.get("rua_cache_ts"),
@@ -87,7 +87,7 @@ def salvar_posicao(nome, data):
 def buscar_posicao(nome):
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM ultima_posicao WHERE nome = ?", (nome,))
+        cur = conn.execute("SELECT * FROM ultima_posicao WHERE nome = ?", (nome.lower(),))
         row = cur.fetchone()
         return dict(row) if row else None
 
@@ -196,11 +196,30 @@ def buscar_poi_a_frente(lat, lon, cog, raio=500):
         return None
 
 # ==============================
+# UPDATE POSIÇÃO
+# ==============================
+@app.route("/update", methods=["POST"])
+def update():
+    data = request.json
+    if not data or "nome" not in data:
+        return jsonify({"erro": "Dados inválidos"}), 400
+
+    data["timestamp"] = data.get("timestamp", int(time.time()))
+
+    if "vel" in data and data["vel"] > 0.5:
+        data["estado_movimento"] = "andando"
+    else:
+        data["estado_movimento"] = "parado"
+
+    salvar_posicao(data["nome"], data)
+    return jsonify({"status": "ok"})
+
+# ==============================
 # /where
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
-    pos = buscar_posicao(nome.lower())
+    pos = buscar_posicao(nome)
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
@@ -221,7 +240,7 @@ def onde_esta(nome):
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
-    pos = buscar_posicao(nome.lower())
+    pos = buscar_posicao(nome)
     if not pos:
         return jsonify({"erro": "Pessoa não encontrada"}), 404
 
