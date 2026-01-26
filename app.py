@@ -131,6 +131,8 @@ def distancia_metros(lat1, lon1, lat2, lon2):
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 def formatar_tempo(segundos):
+    if segundos < 120:
+        return "agora"
     minutos = max(1, int(segundos / 60))
     if minutos < 60:
         return f"{minutos} minuto{'s' if minutos != 1 else ''}"
@@ -153,18 +155,88 @@ def latlon_para_rua(lat, lon):
         r.raise_for_status()
         data = r.json()
         address = data.get("address", {})
+        
         # POI mais específico
         if "train_station" in address:
             return f"Estação {address['train_station']}"
         if "bus_station" in address:
             return f"Estação {address['bus_station']}"
         if "subway" in address:
-            return f"Estação {address['subway']}"
+            return f"Estação {address['subway']} do Metrô"
+        
+        # Outros POIs importantes
+        pois_importantes = [
+            ("hospital", "Hospital"),
+            ("school", "Escola"),
+            ("university", "Universidade"),
+            ("shopping_center", "Shopping"),
+            ("supermarket", "Supermercado"),
+            ("restaurant", "Restaurante"),
+            ("cafe", "Café"),
+            ("park", "Parque"),
+            ("stadium", "Estádio"),
+            ("theatre", "Teatro"),
+            ("cinema", "Cinema"),
+            ("mall", "Shopping"),
+        ]
+        
+        for key, prefix in pois_importantes:
+            if key in address:
+                return f"{prefix} {address[key]}"
+        
+        # Fallback para rua + bairro + cidade
         rua = address.get("road")
         bairro = address.get("suburb") or address.get("neighbourhood")
         cidade = address.get("city") or address.get("town")
         partes = [p for p in [rua, bairro, cidade] if p]
         return ", ".join(partes) if partes else None
+    except:
+        return None
+
+def buscar_poi_em_raio(lat, lon, raio_metros):
+    """Busca POI usando busca do Nominatim em um raio"""
+    try:
+        url = "https://nominatim.openstreetmap.org/search"
+        params = {
+            "format": "json",
+            "lat": lat,
+            "lon": lon,
+            "addressdetails": 1,
+            "limit": 10,
+            "radius": raio_metros
+        }
+        headers = {"User-Agent": "OndeEsta/1.0"}
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r.raise_for_status()
+        results = r.json()
+        
+        for result in results:
+            address = result.get("address", {})
+            
+            # Verificar POIs de transporte
+            if "train_station" in address:
+                return f"Estação {address['train_station']}"
+            if "bus_station" in address:
+                return f"Estação {address['bus_station']}"
+            if "subway" in address:
+                return f"Estação {address['subway']} do Metrô"
+            
+            # Outros POIs
+            pois_importantes = [
+                ("hospital", "Hospital"),
+                ("school", "Escola"),
+                ("university", "Universidade"),
+                ("shopping_center", "Shopping"),
+                ("supermarket", "Supermercado"),
+                ("park", "Parque"),
+                ("stadium", "Estádio"),
+            ]
+            
+            for key, prefix in pois_importantes:
+                if key in address:
+                    return f"{prefix} {address[key]}"
+        
+        return None
     except:
         return None
 
@@ -178,16 +250,49 @@ def grau_para_direcao(cog):
     return direcoes[idx]
 
 # ==============================
-# Próximo POI à frente (simples)
+# Próximo POI à frente
 # ==============================
 def proximo_poi(lat, lon, cog):
-    # Pequena projeção para frente (aprox. 100m)
-    delta = 0.001  # ~100m
-    rad = math.radians(cog)
-    lat2 = lat + delta * math.cos(rad)
-    lon2 = lon + delta * math.sin(rad)
-    poi = latlon_para_rua(lat2, lon2)
-    return poi or "essa região"
+    """Busca o próximo POI na direção do movimento"""
+    # Projeção para frente (aprox. 200-500m)
+    for distancia in [0.002, 0.005]:  # ~200m, ~500m
+        rad = math.radians(cog)
+        lat2 = lat + distancia * math.cos(rad)
+        lon2 = lon + distancia * math.sin(rad)
+        poi = latlon_para_rua(lat2, lon2)
+        if poi and poi != "essa região":
+            return poi
+    
+    return "essa região"
+
+# ==============================
+# Determinar local com prioridade
+# ==============================
+def determinar_local_prioritario(lat, lon):
+    """
+    Retorna o local seguindo a ordem de prioridade:
+    1. Região salva no banco (raio específico)
+    2. POI a 100m
+    3. POI a 500m
+    4. Rua + Bairro + Cidade
+    """
+    # 1. Verificar regiões salvas
+    regioes_salvas = verificar_regioes(lat, lon)
+    if regioes_salvas:
+        return regioes_salvas[0]
+    
+    # 2. POI a 100m
+    poi_100 = buscar_poi_em_raio(lat, lon, 100)
+    if poi_100:
+        return poi_100
+    
+    # 3. POI a 500m
+    poi_500 = buscar_poi_em_raio(lat, lon, 500)
+    if poi_500:
+        return poi_500
+    
+    # 4. Fallback: rua + bairro + cidade
+    return latlon_para_rua(lat, lon) or "essa região"
 
 # ==============================
 # Webhook OwnTracks
@@ -295,7 +400,7 @@ def health():
     return "OwnTracks endpoint ativo", 200
 
 # ==============================
-# /where/<nome> - ajustado para POI
+# /where/<nome> - APRIMORADO
 # ==============================
 @app.route("/where/<nome>")
 def onde_esta(nome):
@@ -305,19 +410,25 @@ def onde_esta(nome):
 
     lat = pos["lat"]
     lon = pos["lon"]
-    regioes_atuais = verificar_regioes(lat, lon)
-    local = regioes_atuais[0] if regioes_atuais else pos.get("rua_cache") or "essa região"
-
+    local = determinar_local_prioritario(lat, lon)
     estado = pos.get("estado_movimento")
+
     if estado == "parado":
-        texto = f"{nome.capitalize()} está parado próximo a {local}. Você quer mais detalhes?"
+        texto = f"{nome.capitalize()} está parado próximo de {local}. Você quer mais detalhes?"
     else:
         poi_frente = proximo_poi(lat, lon, pos.get("cog", 0))
-        texto = f"{nome.capitalize()} está passando próximo a {local} em direção à {poi_frente}. Você quer mais detalhes?"
-    return jsonify({"resposta": texto})
+        texto = f"{nome.capitalize()} está passando próximo de {local} em direção à {poi_frente}. Você quer mais detalhes?"
+    
+    return jsonify({
+        "resposta": texto,
+        "lat": lat,
+        "lon": lon,
+        "local": local,
+        "estado": estado
+    })
 
 # ==============================
-# /details/<nome> - aprimorado
+# /details/<nome> - APRIMORADO
 # ==============================
 @app.route("/details/<nome>")
 def detalhes(nome):
@@ -333,14 +444,15 @@ def detalhes(nome):
 
     regioes_atuais = verificar_regioes(lat, lon)
     precisa_salvar = len(regioes_atuais) == 0 and estado == "parado"
-    local = ", ".join(regioes_atuais) if regioes_atuais else pos.get("rua_cache") or "essa região"
 
     if estado == "parado":
-        texto = f"Essa pessoa está parada nesse local há {tempo}, bateria do celular em {pos['batt']}%."
+        estava = "estava" if tempo != "agora" else "está"
+        texto = f"Essa pessoa {estava} parada nesse local há {tempo}, bateria do celular em {pos['batt']}%."
     else:
         vel_kmh = round(pos["vel"] * 3.6)
         ritmo = "rápido" if vel_kmh > 7 else "devagar"
-        texto = f"Essa pessoa está passando {ritmo} por esse local {('agora' if tempo_seg < 120 else 'há ' + tempo)}, bateria do celular em {pos['batt']}%."
+        estava = "estava" if tempo != "agora" else "está"
+        texto = f"Essa pessoa {estava} passando {ritmo} por esse local {tempo if tempo == 'agora' else 'há ' + tempo}, bateria do celular em {pos['batt']}%."
 
     return jsonify({
         "detalhes": texto,
@@ -358,6 +470,7 @@ def salvar_regiao_manual():
     nome_regiao = data.get("nome")
     lat = data.get("lat")
     lon = data.get("lon")
+    raio = data.get("raio", 40)
 
     if not nome_regiao or lat is None or lon is None:
         return jsonify({"erro": "Dados insuficientes"}), 400
@@ -365,7 +478,7 @@ def salvar_regiao_manual():
     try:
         lat = float(lat)
         lon = float(lon)
-        salvar_regiao(nome_regiao, lat, lon, 40)  # Raio ajustado para 40 metros
+        salvar_regiao(nome_regiao, lat, lon, raio)
         return jsonify({"status": "ok", "mensagem": f"Região '{nome_regiao}' salva com sucesso."})
     except Exception as e:
         return jsonify({"erro": "Falha ao salvar região", "detalhes": str(e)}), 500
@@ -378,7 +491,7 @@ def listar_regioes():
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.row_factory = sqlite3.Row
-            cur = conn.execute("SELECT * FROM regioes")
+            cur = conn.execute("SELECT * FROM regioes ORDER BY nome")
             regioes = cur.fetchall()
         return jsonify({
             "total": len(regioes),
