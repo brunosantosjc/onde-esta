@@ -531,12 +531,18 @@ def detalhes(nome):
 
     if estado == "parado":
         estava = "estava" if tempo != "agora" else "está"
-        texto = f"Essa pessoa {estava} parada nesse local há {tempo}, bateria do celular em {pos['batt']}%."
+        if tempo == "agora":
+            texto = f"Essa pessoa {estava} parada nesse local {tempo}, bateria do celular em {pos['batt']}%."
+        else:
+            texto = f"Essa pessoa {estava} parada nesse local há {tempo}, bateria do celular em {pos['batt']}%."
     else:
         vel_kmh = round(pos["vel"] * 3.6)
         ritmo = "rápido" if vel_kmh > 7 else "devagar"
         estava = "estava" if tempo != "agora" else "está"
-        texto = f"Essa pessoa {estava} passando {ritmo} por esse local {tempo if tempo == 'agora' else 'há ' + tempo}, bateria do celular em {pos['batt']}%."
+        if tempo == "agora":
+            texto = f"Essa pessoa {estava} passando {ritmo} por esse local {tempo}, bateria do celular em {pos['batt']}%."
+        else:
+            texto = f"Essa pessoa {estava} passando {ritmo} por esse local há {tempo}, bateria do celular em {pos['batt']}%."
 
     return jsonify({
         "detalhes": texto,
