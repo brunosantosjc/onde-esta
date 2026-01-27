@@ -216,7 +216,12 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
         
         # Categorias de POIs em ordem de prioridade
         categorias = [
-            # Transporte público (PRIORIDADE MÁXIMA - deve vir PRIMEIRO)
+            # Shopping Centers (PRIORIDADE MÁXIMA)
+            'node["shop"="mall"](around:{raio},{lat},{lon});',
+            'way["shop"="mall"](around:{raio},{lat},{lon});',
+            'node["amenity"="marketplace"](around:{raio},{lat},{lon});',
+            'way["amenity"="marketplace"](around:{raio},{lat},{lon});',
+            # Transporte público (segunda prioridade)
             'node["railway"="station"](around:{raio},{lat},{lon});',
             'node["railway"="subway_entrance"](around:{raio},{lat},{lon});',
             'node["railway"="subway"](around:{raio},{lat},{lon});',
@@ -225,14 +230,11 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
             'node["amenity"="bus_station"](around:{raio},{lat},{lon});',
             'way["railway"="station"](around:{raio},{lat},{lon});',
             'way["public_transport"="station"](around:{raio},{lat},{lon});',
-            # Saúde (segunda prioridade)
+            # Saúde
             'node["amenity"="hospital"](around:{raio},{lat},{lon});',
             # Educação
             'node["amenity"="university"](around:{raio},{lat},{lon});',
             'node["amenity"="school"](around:{raio},{lat},{lon});',
-            # Shopping e grandes centros
-            'node["shop"="mall"](around:{raio},{lat},{lon});',
-            'way["shop"="mall"](around:{raio},{lat},{lon});',
             # Lazer importante
             'node["leisure"="stadium"](around:{raio},{lat},{lon});',
             'node["leisure"="park"](around:{raio},{lat},{lon});',
@@ -268,27 +270,38 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
         
         if data.get("elements"):
             # Filtrar por categoria de importância
-            # 1. Priorizar transporte público
-            transporte = [e for e in data["elements"] if 
-                         e.get("tags", {}).get("railway") in ["station", "subway_entrance", "subway"] or
-                         e.get("tags", {}).get("public_transport") == "station" or
-                         e.get("tags", {}).get("amenity") == "bus_station"]
+            # 1. Priorizar Shopping Centers
+            shoppings = [e for e in data["elements"] if 
+                        e.get("tags", {}).get("shop") == "mall" or
+                        e.get("tags", {}).get("amenity") == "marketplace"]
             
-            # 2. Se tiver transporte, usar só transporte
-            if transporte:
-                elementos_com_nome = [e for e in transporte if e.get("tags", {}).get("name")]
-                elementos = elementos_com_nome if elementos_com_nome else transporte
+            # 2. Se tiver shopping, usar só shopping
+            if shoppings:
+                elementos_com_nome = [e for e in shoppings if e.get("tags", {}).get("name")]
+                elementos = elementos_com_nome if elementos_com_nome else shoppings
             else:
-                # 3. Se não tiver transporte, priorizar outros POIs com nome
-                elementos_com_nome = [e for e in data["elements"] if e.get("tags", {}).get("name")]
-                elementos = elementos_com_nome if elementos_com_nome else data["elements"]
+                # 3. Se não tiver shopping, priorizar transporte público
+                transporte = [e for e in data["elements"] if 
+                             e.get("tags", {}).get("railway") in ["station", "subway_entrance", "subway"] or
+                             e.get("tags", {}).get("public_transport") == "station" or
+                             e.get("tags", {}).get("amenity") == "bus_station"]
+                
+                if transporte:
+                    elementos_com_nome = [e for e in transporte if e.get("tags", {}).get("name")]
+                    elementos = elementos_com_nome if elementos_com_nome else transporte
+                else:
+                    # 4. Se não tiver shopping nem transporte, priorizar outros POIs com nome
+                    elementos_com_nome = [e for e in data["elements"] if e.get("tags", {}).get("name")]
+                    elementos = elementos_com_nome if elementos_com_nome else data["elements"]
             
             elemento = elementos[0]
             tags = elemento.get("tags", {})
             nome = tags.get("name", "")
             
             # Determinar tipo de POI
-            if tags.get("railway") == "station":
+            if tags.get("shop") == "mall" or tags.get("amenity") == "marketplace":
+                return f"Shopping {nome}" if nome else "Shopping"
+            elif tags.get("railway") == "station":
                 return f"Estação {nome}" if nome else "Estação de Trem"
             elif tags.get("railway") in ["subway_entrance", "subway"]:
                 return f"Estação {nome} do Metrô" if nome else "Estação do Metrô"
@@ -302,8 +315,6 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
                 return f"Escola {nome}" if nome else "Escola"
             elif tags.get("amenity") == "university":
                 return f"Universidade {nome}" if nome else "Universidade"
-            elif tags.get("shop") == "mall":
-                return f"Shopping {nome}" if nome else "Shopping"
             elif tags.get("shop") == "supermarket":
                 return f"Supermercado {nome}" if nome else "Supermercado"
             elif tags.get("amenity") == "theatre":
@@ -346,8 +357,8 @@ def proximo_poi(lat, lon, cog):
         lat2 = lat + distancia_km * math.cos(rad)
         lon2 = lon + distancia_km * math.sin(rad) / math.cos(math.radians(lat))
         
-        # Buscar POI próximo ao ponto projetado
-        poi = buscar_poi_em_raio(lat2, lon2, 100)
+        # Buscar POI prioritário próximo ao ponto projetado
+        poi = buscar_poi_prioritario(lat2, lon2, 500)
         if poi:
             # Adicionar bairro ao POI encontrado
             bairro = extrair_bairro(lat2, lon2)
@@ -355,25 +366,190 @@ def proximo_poi(lat, lon, cog):
                 return f"{poi} em {bairro}"
             return poi
     
-    # Se não encontrou nada à frente, buscar POI genérico próximo
-    poi_generico = buscar_poi_em_raio(lat, lon, 200)
-    if poi_generico:
+    # Se não encontrou POI prioritário à frente, buscar POI secundário próximo
+    poi_secundario = buscar_poi_secundario(lat, lon, 200)
+    if poi_secundario:
         bairro = extrair_bairro(lat, lon)
         if bairro:
-            return f"{poi_generico} em {bairro}"
-        return poi_generico
+            return f"{poi_secundario} em {bairro}"
+        return poi_secundario
     
     return "essa região"
 
 # ==============================
 # Determinar local com prioridade
 # ==============================
+def buscar_poi_prioritario(lat, lon, raio_metros):
+    """Busca apenas POIs prioritários (shopping, transporte, hospitais, etc) - excluindo supermercados e restaurantes"""
+    try:
+        overpass_url = "https://overpass-api.de/api/interpreter"
+        
+        # Apenas categorias prioritárias (1 a 11)
+        categorias = [
+            # Shopping Centers e Hipermercados (PRIORIDADE MÁXIMA)
+            'node["shop"="mall"](around:{raio},{lat},{lon});',
+            'way["shop"="mall"](around:{raio},{lat},{lon});',
+            'node["amenity"="marketplace"](around:{raio},{lat},{lon});',
+            'way["amenity"="marketplace"](around:{raio},{lat},{lon});',
+            'node["shop"="department_store"](around:{raio},{lat},{lon});',
+            'way["shop"="department_store"](around:{raio},{lat},{lon});',
+            # Transporte público
+            'node["railway"="station"](around:{raio},{lat},{lon});',
+            'node["railway"="subway_entrance"](around:{raio},{lat},{lon});',
+            'node["railway"="subway"](around:{raio},{lat},{lon});',
+            'node["public_transport"="station"](around:{raio},{lat},{lon});',
+            'node["amenity"="bus_station"](around:{raio},{lat},{lon});',
+            'way["railway"="station"](around:{raio},{lat},{lon});',
+            'way["public_transport"="station"](around:{raio},{lat},{lon});',
+            # Saúde
+            'node["amenity"="hospital"](around:{raio},{lat},{lon});',
+            # Educação
+            'node["amenity"="university"](around:{raio},{lat},{lon});',
+            'node["amenity"="school"](around:{raio},{lat},{lon});',
+            # Lazer importante
+            'node["leisure"="stadium"](around:{raio},{lat},{lon});',
+            'node["leisure"="park"](around:{raio},{lat},{lon});',
+            # Entretenimento
+            'node["amenity"="theatre"](around:{raio},{lat},{lon});',
+            'node["amenity"="cinema"](around:{raio},{lat},{lon});',
+        ]
+        
+        query_parts = []
+        for cat in categorias:
+            query_parts.append(cat.format(raio=raio_metros, lat=lat, lon=lon))
+        
+        overpass_query = f"""
+        [out:json][timeout:10];
+        (
+            {' '.join(query_parts)}
+        );
+        out body 10;
+        """
+        
+        response = requests.post(overpass_url, data={"data": overpass_query}, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get("elements"):
+            # Priorizar Shopping Centers e Hipermercados
+            shoppings = [e for e in data["elements"] if 
+                        e.get("tags", {}).get("shop") in ["mall", "department_store"] or
+                        e.get("tags", {}).get("amenity") == "marketplace"]
+            
+            if shoppings:
+                elementos_com_nome = [e for e in shoppings if e.get("tags", {}).get("name")]
+                elementos = elementos_com_nome if elementos_com_nome else shoppings
+            else:
+                # Priorizar transporte público
+                transporte = [e for e in data["elements"] if 
+                             e.get("tags", {}).get("railway") in ["station", "subway_entrance", "subway"] or
+                             e.get("tags", {}).get("public_transport") == "station" or
+                             e.get("tags", {}).get("amenity") == "bus_station"]
+                
+                if transporte:
+                    elementos_com_nome = [e for e in transporte if e.get("tags", {}).get("name")]
+                    elementos = elementos_com_nome if elementos_com_nome else transporte
+                else:
+                    # Outros POIs prioritários com nome
+                    elementos_com_nome = [e for e in data["elements"] if e.get("tags", {}).get("name")]
+                    elementos = elementos_com_nome if elementos_com_nome else data["elements"]
+            
+            elemento = elementos[0]
+            tags = elemento.get("tags", {})
+            nome = tags.get("name", "")
+            
+            # Determinar tipo de POI
+            if tags.get("shop") == "mall" or tags.get("amenity") == "marketplace":
+                return f"Shopping {nome}" if nome else "Shopping"
+            elif tags.get("shop") == "department_store":
+                return f"Hipermercado {nome}" if nome else "Hipermercado"
+            elif tags.get("railway") == "station":
+                return f"Estação {nome}" if nome else "Estação de Trem"
+            elif tags.get("railway") in ["subway_entrance", "subway"]:
+                return f"Estação {nome} do Metrô" if nome else "Estação do Metrô"
+            elif tags.get("public_transport") == "station":
+                return f"Estação {nome}" if nome else "Estação"
+            elif tags.get("amenity") == "bus_station":
+                return f"Terminal {nome}" if nome else "Terminal de Ônibus"
+            elif tags.get("amenity") == "hospital":
+                return f"Hospital {nome}" if nome else "Hospital"
+            elif tags.get("amenity") == "school":
+                return f"Escola {nome}" if nome else "Escola"
+            elif tags.get("amenity") == "university":
+                return f"Universidade {nome}" if nome else "Universidade"
+            elif tags.get("amenity") == "theatre":
+                return f"Teatro {nome}" if nome else "Teatro"
+            elif tags.get("amenity") == "cinema":
+                return f"Cinema {nome}" if nome else "Cinema"
+            elif tags.get("leisure") == "park":
+                return f"Parque {nome}" if nome else "Parque"
+            elif tags.get("leisure") == "stadium":
+                return f"Estádio {nome}" if nome else "Estádio"
+            elif nome:
+                return nome
+        
+        return None
+    except Exception as e:
+        print(f"Erro ao buscar POI prioritário: {e}")
+        return None
+
+def buscar_poi_secundario(lat, lon, raio_metros):
+    """Busca apenas POIs secundários (supermercados e restaurantes/cafés)"""
+    try:
+        overpass_url = "https://overpass-api.de/api/interpreter"
+        
+        # Apenas categorias secundárias (12 e 13)
+        categorias = [
+            'node["shop"="supermarket"](around:{raio},{lat},{lon});',
+            'node["amenity"="restaurant"](around:{raio},{lat},{lon});',
+            'node["amenity"="cafe"](around:{raio},{lat},{lon});',
+        ]
+        
+        query_parts = []
+        for cat in categorias:
+            query_parts.append(cat.format(raio=raio_metros, lat=lat, lon=lon))
+        
+        overpass_query = f"""
+        [out:json][timeout:10];
+        (
+            {' '.join(query_parts)}
+        );
+        out body 10;
+        """
+        
+        response = requests.post(overpass_url, data={"data": overpass_query}, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get("elements"):
+            # Priorizar POIs com nome
+            elementos_com_nome = [e for e in data["elements"] if e.get("tags", {}).get("name")]
+            elementos = elementos_com_nome if elementos_com_nome else data["elements"]
+            
+            elemento = elementos[0]
+            tags = elemento.get("tags", {})
+            nome = tags.get("name", "")
+            
+            if tags.get("shop") == "supermarket":
+                return f"Supermercado {nome}" if nome else "Supermercado"
+            elif tags.get("amenity") == "restaurant":
+                return f"Restaurante {nome}" if nome else "Restaurante"
+            elif tags.get("amenity") == "cafe":
+                return f"Café {nome}" if nome else "Café"
+            elif nome:
+                return nome
+        
+        return None
+    except Exception as e:
+        print(f"Erro ao buscar POI secundário: {e}")
+        return None
+
 def determinar_local_prioritario(lat, lon):
     """
     Retorna o local seguindo a ordem de prioridade:
-    1. Região salva no banco (raio específico)
-    2. POI a 500m (Overpass API) + bairro
-    3. POI a 1000m (Overpass API) + bairro
+    1. Região salva no banco (raio específico ~40m)
+    2. POIs prioritários a 1000m (shopping, transporte, hospitais, escolas, parques, teatros) + bairro
+    3. POIs secundários a 400m (supermercados, restaurantes, cafés) + bairro
     4. Rua + Bairro + Cidade (Nominatim)
     """
     # 1. Verificar regiões salvas
@@ -381,21 +557,21 @@ def determinar_local_prioritario(lat, lon):
     if regioes_salvas:
         return regioes_salvas[0]
     
-    # 2. POI a 500m usando Overpass + bairro
-    poi_500 = buscar_poi_em_raio(lat, lon, 500)
-    if poi_500:
+    # 2. POIs prioritários a 1000m + bairro
+    poi_prioritario = buscar_poi_prioritario(lat, lon, 1000)
+    if poi_prioritario:
         bairro = extrair_bairro(lat, lon)
         if bairro:
-            return f"{poi_500} em {bairro}"
-        return poi_500
+            return f"{poi_prioritario} em {bairro}"
+        return poi_prioritario
     
-    # 3. POI a 1000m usando Overpass + bairro
-    poi_1000 = buscar_poi_em_raio(lat, lon, 1000)
-    if poi_1000:
+    # 3. POIs secundários a 400m + bairro
+    poi_secundario = buscar_poi_secundario(lat, lon, 400)
+    if poi_secundario:
         bairro = extrair_bairro(lat, lon)
         if bairro:
-            return f"{poi_1000} em {bairro}"
-        return poi_1000
+            return f"{poi_secundario} em {bairro}"
+        return poi_secundario
     
     # 4. Fallback: rua + bairro + cidade usando Nominatim
     return latlon_para_rua(lat, lon) or "essa região"
