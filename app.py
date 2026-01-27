@@ -216,21 +216,31 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
         
         # Categorias de POIs em ordem de prioridade
         categorias = [
-            # Transporte público (prioridade máxima)
+            # Transporte público (PRIORIDADE MÁXIMA - deve vir PRIMEIRO)
             'node["railway"="station"](around:{raio},{lat},{lon});',
             'node["railway"="subway_entrance"](around:{raio},{lat},{lon});',
+            'node["railway"="subway"](around:{raio},{lat},{lon});',
             'node["public_transport"="station"](around:{raio},{lat},{lon});',
+            'node["public_transport"="stop_position"]["train"="yes"](around:{raio},{lat},{lon});',
             'node["amenity"="bus_station"](around:{raio},{lat},{lon});',
-            # Locais importantes
+            'way["railway"="station"](around:{raio},{lat},{lon});',
+            'way["public_transport"="station"](around:{raio},{lat},{lon});',
+            # Saúde (segunda prioridade)
             'node["amenity"="hospital"](around:{raio},{lat},{lon});',
-            'node["amenity"="school"](around:{raio},{lat},{lon});',
+            # Educação
             'node["amenity"="university"](around:{raio},{lat},{lon});',
+            'node["amenity"="school"](around:{raio},{lat},{lon});',
+            # Shopping e grandes centros
             'node["shop"="mall"](around:{raio},{lat},{lon});',
-            'node["shop"="supermarket"](around:{raio},{lat},{lon});',
+            'way["shop"="mall"](around:{raio},{lat},{lon});',
+            # Lazer importante
+            'node["leisure"="stadium"](around:{raio},{lat},{lon});',
+            'node["leisure"="park"](around:{raio},{lat},{lon});',
+            # Entretenimento
             'node["amenity"="theatre"](around:{raio},{lat},{lon});',
             'node["amenity"="cinema"](around:{raio},{lat},{lon});',
-            'node["leisure"="park"](around:{raio},{lat},{lon});',
-            'node["leisure"="stadium"](around:{raio},{lat},{lon});',
+            # Comércio (menor prioridade)
+            'node["shop"="supermarket"](around:{raio},{lat},{lon});',
             'node["amenity"="restaurant"](around:{raio},{lat},{lon});',
             'node["amenity"="cafe"](around:{raio},{lat},{lon});',
         ]
@@ -257,9 +267,21 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
         data = response.json()
         
         if data.get("elements"):
-            # Priorizar POIs que têm nome
-            elementos_com_nome = [e for e in data["elements"] if e.get("tags", {}).get("name")]
-            elementos = elementos_com_nome if elementos_com_nome else data["elements"]
+            # Filtrar por categoria de importância
+            # 1. Priorizar transporte público
+            transporte = [e for e in data["elements"] if 
+                         e.get("tags", {}).get("railway") in ["station", "subway_entrance", "subway"] or
+                         e.get("tags", {}).get("public_transport") == "station" or
+                         e.get("tags", {}).get("amenity") == "bus_station"]
+            
+            # 2. Se tiver transporte, usar só transporte
+            if transporte:
+                elementos_com_nome = [e for e in transporte if e.get("tags", {}).get("name")]
+                elementos = elementos_com_nome if elementos_com_nome else transporte
+            else:
+                # 3. Se não tiver transporte, priorizar outros POIs com nome
+                elementos_com_nome = [e for e in data["elements"] if e.get("tags", {}).get("name")]
+                elementos = elementos_com_nome if elementos_com_nome else data["elements"]
             
             elemento = elementos[0]
             tags = elemento.get("tags", {})
@@ -268,7 +290,7 @@ def buscar_poi_em_raio(lat, lon, raio_metros):
             # Determinar tipo de POI
             if tags.get("railway") == "station":
                 return f"Estação {nome}" if nome else "Estação de Trem"
-            elif tags.get("railway") == "subway_entrance":
+            elif tags.get("railway") in ["subway_entrance", "subway"]:
                 return f"Estação {nome} do Metrô" if nome else "Estação do Metrô"
             elif tags.get("public_transport") == "station":
                 return f"Estação {nome}" if nome else "Estação"
