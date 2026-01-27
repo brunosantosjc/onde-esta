@@ -156,6 +156,7 @@ def latlon_para_rua(lat, lon):
         data = r.json()
         address = data.get("address", {})
         
+        # POI mais específico
         if "train_station" in address:
             return f"Estação {address['train_station']}"
         if "bus_station" in address:
@@ -163,33 +164,32 @@ def latlon_para_rua(lat, lon):
         if "subway" in address:
             return f"Estação {address['subway']} do Metrô"
         
+        # Outros POIs importantes
+        pois_importantes = [
+            ("hospital", "Hospital"),
+            ("school", "Escola"),
+            ("university", "Universidade"),
+            ("shopping_center", "Shopping"),
+            ("supermarket", "Supermercado"),
+            ("restaurant", "Restaurante"),
+            ("cafe", "Café"),
+            ("park", "Parque"),
+            ("stadium", "Estádio"),
+            ("theatre", "Teatro"),
+            ("cinema", "Cinema"),
+            ("mall", "Shopping"),
+        ]
+        
+        for key, prefix in pois_importantes:
+            if key in address:
+                return f"{prefix} {address[key]}"
+        
+        # Fallback para rua + bairro + cidade
         rua = address.get("road")
-        bairro = (
-            address.get("city_district")
-            or address.get("suburb")
-            or address.get("neighbourhood")
-        )
+        bairro = address.get("suburb") or address.get("neighbourhood")
         cidade = address.get("city") or address.get("town")
         partes = [p for p in [rua, bairro, cidade] if p]
         return ", ".join(partes) if partes else None
-    except:
-        return None
-
-def extrair_bairro(lat, lon):
-    try:
-        url = "https://nominatim.openstreetmap.org/reverse"
-        params = {"lat": lat, "lon": lon, "format": "json", "addressdetails": 1, "zoom": 18}
-        headers = {"User-Agent": "OndeEsta/1.0"}
-        r = requests.get(url, params=params, headers=headers, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        address = data.get("address", {})
-        bairro = (
-            address.get("city_district")
-            or address.get("suburb")
-            or address.get("neighbourhood")
-        )
-        return bairro
     except:
         return None
 
